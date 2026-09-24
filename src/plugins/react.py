@@ -1,0 +1,87 @@
+"""为消息贴表情的插件。
+
+用法：/react <表情>
+"""
+
+import re
+from typing import Optional
+
+from nonebot import logger, on_command
+from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent
+from nonebot.adapters.onebot.v11.exception import ActionFailed
+from nonebot.params import CommandArg
+from nonebot.plugin import PluginMetadata
+
+__plugin_meta__ = PluginMetadata(
+    name="贴表情",
+    description="为触发指令的消息贴上指定的表情",
+    usage="/react <表情>：给触发指令的消息贴上对应表情",
+    type="application",
+    supported_adapters={"~onebot.v11"},
+)
+
+# 常见 Unicode 表情字符范围
+_EMOJI_CHARS = (
+    "\u2600-\u27bf"  # 杂项符号与装饰符号
+    "\u2b00-\u2bff"  # 杂项符号与箭头
+    "\U0001f000-\U0001f0ff"  # 麻将、扑克牌、多米诺骨牌
+    "\U0001f1e6-\U0001f1ff"  # 区域指示符（国旗）
+    "\U0001f300-\U0001f5ff"  # 杂项符号和象形文字
+    "\U0001f600-\U0001f64f"  # 表情符号
+    "\U0001f680-\U0001f6ff"  # 交通和地图符号
+    "\U0001f700-\U0001f77f"  # 炼金术符号
+    "\U0001f780-\U0001f7ff"  # 几何图形扩展
+    "\U0001f800-\U0001f8ff"  # 补充箭头符号 C
+    "\U0001f900-\U0001f9ff"  # 补充符号和象形文字
+    "\U0001fa00-\U0001faff"  # 符号和象形文字扩展
+)
+# 变体选择符、零宽连接符、键帽组合符、肤色修饰符
+_EMOJI_JOINERS = "\u200d\ufe0f\u20e3\U0001f3fb-\U0001f3ff"
+_FLAG_CHARS = "\U0001f1e6-\U0001f1ff"
+
+# 匹配单个表情簇：国旗为两个区域指示符，其余表情后跟随 "零宽连接符 + 表情"
+# （如家庭表情）或变体选择符、键帽组合符、肤色修饰符
+_EMOJI_CLUSTER = re.compile(
+    f"(?:[{_FLAG_CHARS}]{{2}}|[{_EMOJI_CHARS}](?:[\u200d][{_EMOJI_CHARS}]|[{_EMOJI_JOINERS}])*)"
+)
+
+react = on_command("react")
+
+
+def _extract_emoji(message: Message) -> Optional[str]:
+    """从命令参数中提取表情，提取不到时返回 None。"""
+    # 优先取 QQ 原生表情段（face / mface）
+    for segment in message:
+        if segment.type == "face":
+            face_id = segment.data.get("id")
+            if face_id:
+                return str(face_id)
+        elif segment.type == "mface":
+            emoji_id = segment.data.get("emoji_id")
+            if emoji_id:
+                return str(emoji_id)
+
+    # 其次从纯文本中提取第一个 Unicode 表情
+    match = _EMOJI_CLUSTER.search(message.extract_plain_text())
+    return match.group() if match else None
+
+
+@react.handle()
+async def handle_react(
+    bot: Bot, event: MessageEvent, args: Message = CommandArg()
+) -> None:
+    emoji = _extract_emoji(args)
+    if emoji is None:
+        # 参数为空或不含表情：不响应
+        await react.finish()
+
+    try:
+        await bot.call_api(
+            "set_msg_emoji_like",
+            message_id=event.message_id,
+            emoji_id=emoji,
+        )
+    except ActionFailed as exc:
+        logger.warning(f"贴表情失败：{exc}")
+
+    await react.finish()
