@@ -49,7 +49,10 @@ react = on_command("react")
 
 
 def _extract_emoji(message: Message) -> Optional[str]:
-    """从命令参数中提取表情，提取不到时返回 None。"""
+    """从命令参数中提取表情，提取不到时返回 None。
+
+    QQ 原生表情段返回其数字 ID，Unicode 表情返回第一个表情簇。
+    """
     # 优先取 QQ 原生表情段（face / mface）
     for segment in message:
         if segment.type == "face":
@@ -66,6 +69,18 @@ def _extract_emoji(message: Message) -> Optional[str]:
     return match.group() if match else None
 
 
+def _to_emoji_id(emoji: str) -> str:
+    """转换为贴表情接口所需的 emoji_id。
+
+    系统表情的数字 ID 直接透传；Unicode 表情需转换为码点的十进制值
+    （dec 值），如 "😄" (U+1F604) 对应 "128516"，否则部分协议端会把
+    其误判为系统表情而静默失败。
+    """
+    if emoji.isascii() and emoji.isdigit():
+        return emoji
+    return str(ord(emoji[0]))
+
+
 @react.handle()
 async def handle_react(
     bot: Bot, event: MessageEvent, args: Message = CommandArg()
@@ -79,7 +94,7 @@ async def handle_react(
         await bot.call_api(
             "set_msg_emoji_like",
             message_id=event.message_id,
-            emoji_id=emoji,
+            emoji_id=_to_emoji_id(emoji),
         )
     except ActionFailed as exc:
         logger.warning(f"贴表情失败：{exc}")
