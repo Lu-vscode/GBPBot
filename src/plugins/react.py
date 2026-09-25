@@ -15,7 +15,7 @@ from nonebot.plugin import PluginMetadata
 __plugin_meta__ = PluginMetadata(
     name="贴表情",
     description="为触发指令的消息贴上指定的表情",
-    usage="/react <表情>：给触发指令的消息贴上对应表情",
+    usage="/react <表情>：给这条消息贴上对应表情，引用其它消息时贴给被引用的消息",
     type="application",
     supported_adapters={"~onebot.v11"},
 )
@@ -81,6 +81,21 @@ def _to_emoji_id(emoji: str) -> str:
     return str(ord(emoji[0]))
 
 
+def _get_target_message_id(event: MessageEvent) -> int:
+    """获取贴表情的目标消息 ID。
+
+    触发指令的消息若引用了其它消息，则以被引用的消息为目标，
+    否则以触发指令的消息本身为目标。
+    """
+    for segment in event.message:
+        if segment.type != "reply":
+            continue
+        reply_id = str(segment.data.get("id", "")).strip()
+        if reply_id.isascii() and reply_id.isdigit():
+            return int(reply_id)
+    return event.message_id
+
+
 @react.handle()
 async def handle_react(
     bot: Bot, event: MessageEvent, args: Message = CommandArg()
@@ -93,7 +108,7 @@ async def handle_react(
     try:
         await bot.call_api(
             "set_msg_emoji_like",
-            message_id=event.message_id,
+            message_id=_get_target_message_id(event),
             emoji_id=_to_emoji_id(emoji),
         )
     except ActionFailed as exc:
