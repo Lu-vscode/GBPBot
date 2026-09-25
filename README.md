@@ -1,12 +1,18 @@
-# GBPBot
+# GBPBot 用户手册
 
-## How to start
+GBPBot（机器人昵称：Q群管家Pro）是一个 QQ 群机器人。在群聊或私聊中发送指令即可与它交互。
 
-1. generate project using `nb create` .
-2. create your plugin using `nb plugin create` .
-3. writing your plugins under `src/plugins` folder.
-4. run your bot using `nb run --reload` .
+## 可用指令
 
-## Documentation
+指令以 `/` 开头，直接发送即可，无需 @ 机器人：
 
-See [Docs](https://nonebot.dev/)
+| 指令 | 说明 |
+| --- | --- |
+| `/help` | 回复本手册的地址 |
+| `/react <表情>` | 给这条指令消息贴上指定表情，支持 QQ 自带表情与 emoji，如 `/react 😄` |
+
+## 实名群昵称检查
+
+在开启检查的实名群里，机器人会自动检查每位成员发言时的群昵称。
+
+昵称不符合格式或未设置群昵称时，机器人会发送一条提醒；提醒里的 `@你的群昵称` 只是文字，不会真正 @ 到你，按提醒中的建议修改群昵称即可。提醒有频率限制，短时间内不会重复打扰。
