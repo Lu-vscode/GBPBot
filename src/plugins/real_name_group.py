@@ -3,22 +3,33 @@
 检查实名群内每条群消息发送者的群昵称（群名片）是否符合配置的格式，
 不符合时按具体原因发送对应的"伪@"提醒（纯文本 "@群昵称 " 前缀，
 不会真正 @ 对方），并按配置限制提醒频率。
+群主、管理员或超级用户可通过 /exempt @成员 理由 将成员加入免验证名单，
+名单使用 localstore 长期存储在本地且按群隔离，名单内成员不再被检查。
 """
 
+import json
 import re
 import time
 from collections import deque
+from datetime import datetime, timezone
 
-from nonebot import get_plugin_config, logger, on_message
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
+from nonebot import get_plugin_config, logger, on_command, on_message
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
+from nonebot.adapters.onebot.v11.permission import GROUP_ADMIN, GROUP_OWNER
+from nonebot.params import CommandArg
+from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata
+from nonebot_plugin_localstore import get_plugin_data_file
 from pydantic import BaseModel
 
 __plugin_meta__ = PluginMetadata(
     name="实名群昵称检查",
     description="检查实名群成员的群昵称是否符合规定格式，不符合时发送伪@提醒",
-    usage="配置实名群群号后自动生效，检查群内每条消息发送者的群昵称",
+    usage=(
+        "配置实名群群号后自动生效，检查群内每条消息发送者的群昵称；"
+        "/exempt @成员 理由：将成员加入免验证名单（群主、管理员或超级用户可用）"
+    ),
     type="application",
     supported_adapters={"~onebot.v11"},
 )
@@ -148,6 +159,56 @@ def _diagnose(display_name: str) -> str:
     return "generic"
 
 
+# 免验证名单存储文件（localstore 插件数据目录），按群号隔离
+_EXEMPTION_FILE = get_plugin_data_file("exemptions.json")
+
+
+def _load_exemptions() -> dict[int, dict[int, dict[str, str]]]:
+    """从本地存储读取免验证名单，文件不存在或损坏时返回空名单。"""
+    if not _EXEMPTION_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(_EXEMPTION_FILE.read_text(encoding="utf-8"))
+        return {
+            int(group_id): {
+                int(user_id): {str(key): str(value) for key, value in record.items()}
+                for user_id, record in members.items()
+            }
+            for group_id, members in raw.items()
+        }
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        logger.warning(f"读取免验证名单失败，本次将视为空名单：{exc}")
+        return {}
+
+
+def _save_exemptions() -> None:
+    """将免验证名单写入本地存储，写入失败时仅记录错误。"""
+    try:
+        _EXEMPTION_FILE.write_text(
+            json.dumps(_exemptions, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.error(f"写入免验证名单失败，本次修改未保存：{exc}")
+
+
+# 免验证名单：群号 -> 成员 QQ 号 -> 记录（理由、操作人、加入时间）
+_exemptions = _load_exemptions()
+if _exemptions:
+    total = sum(len(members) for members in _exemptions.values())
+    logger.info(f"已加载免验证名单，共 {total} 名成员")
+
+
+def _add_exemption(group_id: int, user_id: int, reason: str, operator_id: int) -> None:
+    """将成员加入免验证名单并写入本地存储。"""
+    _exemptions.setdefault(group_id, {})[user_id] = {
+        "reason": reason,
+        "operator": str(operator_id),
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    _save_exemptions()
+
+
 # 提醒限流记录：成员维度记录上次提醒时间，群维度记录窗口内的提醒时间队列
 _member_last_remind: dict[tuple[int, int], float] = {}
 _group_remind_history: dict[int, deque[float]] = {}
@@ -185,7 +246,10 @@ async def handle_real_name_group_check(event: GroupMessageEvent) -> None:
     if event.anonymous is not None:
         # 匿名消息没有群昵称，跳过
         return
-    if event.group_id not in group_ids:
+    # 不在检查范围的群、或在免验证名单中的成员，跳过检查
+    if event.group_id not in group_ids or event.user_id in _exemptions.get(
+        event.group_id, {}
+    ):
         return
 
     # 群名片为空时，成员在群内显示的是 QQ 昵称，同样按显示名检查
@@ -217,3 +281,56 @@ async def handle_real_name_group_check(event: GroupMessageEvent) -> None:
     logger.info(
         f"已提醒成员 {event.user_id}（{display_name}）修改群昵称（原因：{reason}）"
     )
+
+
+# /exempt 命令：仅超级用户、群管理员与群主可用
+exempt_cmd = on_command(
+    "exempt",
+    permission=SUPERUSER | GROUP_ADMIN | GROUP_OWNER,
+)
+
+
+def _parse_exempt_args(args: Message) -> tuple[int | None, str]:
+    """从命令参数中解析目标成员 QQ 号与理由。
+
+    以第一个 @ 段作为目标成员，其之前的内容会被忽略；@全体成员或没有
+    @ 段时目标为 None，理由为目标成员之后的部分，未填写时为空字符串。
+    """
+    for index, segment in enumerate(args):
+        if segment.type != "at":
+            continue
+        qq = str(segment.data.get("qq", ""))
+        if not qq.isdigit():
+            return None, ""
+        reason = "".join(str(part) for part in args[index + 1 :] if part.is_text())
+        return int(qq), reason.strip()
+    return None, ""
+
+
+@exempt_cmd.handle()
+async def handle_exempt(
+    bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
+) -> None:
+    """处理 /exempt 命令：将成员加入本群免验证名单。"""
+    if event.group_id not in group_ids:
+        await exempt_cmd.finish("本群不在实名群检查范围内，无需添加免验证。")
+
+    target, reason = _parse_exempt_args(args)
+    if target is None:
+        await exempt_cmd.finish(
+            "请 @ 要加入免验证名单的群成员后重试"
+            "（格式：/exempt @群成员 理由，不支持 @全体成员）。"
+        )
+    if target == int(bot.self_id):
+        await exempt_cmd.finish("不能将机器人自身加入免验证名单。")
+    if not reason:
+        await exempt_cmd.finish(
+            "请补充将该成员加入免验证名单的理由，格式：/exempt @群成员 理由"
+        )
+
+    _add_exemption(event.group_id, target, reason, event.user_id)
+    logger.info(
+        f"已将成员 {target} 加入群 {event.group_id} 的免验证名单"
+        f"（理由：{reason}，操作人：{event.user_id}）"
+    )
+    await exempt_cmd.finish(f"已将 QQ 号 {target} 添加到免验证名单，理由：{reason}")

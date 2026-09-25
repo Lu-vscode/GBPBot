@@ -140,4 +140,11 @@ dmypy.json
 # pytype static type analyzer
 .pytype/
 
+# Else
+.idea
+.vscode
+
+# Localstore（LOCALSTORE_USE_CWD 数据目录）
+/data/
+
 # End of https://www.toptal.com/developers/gitignore/api/python
