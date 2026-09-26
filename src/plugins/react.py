@@ -4,10 +4,10 @@
 """
 
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from nonebot import logger, on_command
-from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent
+from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
@@ -81,19 +81,50 @@ def _to_emoji_id(emoji: str) -> str:
     return str(ord(emoji[0]))
 
 
-def _get_target_message_id(event: MessageEvent) -> int:
-    """获取贴表情的目标消息 ID。
-
-    触发指令的消息若引用了其它消息，则以被引用的消息为目标，
-    否则以触发指令的消息本身为目标。
-    """
-    for segment in event.message:
+def _find_reply_id(message: Message) -> Optional[int]:
+    """从消息段中提取引用消息的 ID，提取不到时返回 None。"""
+    for segment in message:
         if segment.type != "reply":
             continue
         reply_id = str(segment.data.get("id", "")).strip()
         if reply_id.isascii() and reply_id.isdigit():
             return int(reply_id)
-    return event.message_id
+    return None
+
+
+def _find_reply_id_in_raw(raw: Any) -> Optional[int]:
+    """从 get_msg 返回的原始消息（段数组或 CQ 码字符串）中提取引用 ID。"""
+    if isinstance(raw, str):
+        return _find_reply_id(Message(raw))
+    if isinstance(raw, list):
+        segments = [MessageSegment(**seg) for seg in raw if isinstance(seg, dict)]
+        return _find_reply_id(Message(segments))
+    return None
+
+
+async def _resolve_target_message_id(bot: Bot, event: MessageEvent) -> int:
+    """获取贴表情的目标消息 ID。
+
+    触发指令的消息若引用了其它消息，则以被引用的消息为目标，
+    否则以触发指令的消息本身为目标。协议端解析引用依赖被引用
+    消息已写入本地数据，可能失败导致事件中缺少引用段，此时
+    重新获取该消息再解析一次。
+    """
+    reply_id = _find_reply_id(event.message)
+    if reply_id is not None:
+        return reply_id
+
+    try:
+        info = await bot.call_api("get_msg", message_id=event.message_id)
+        reply_id = _find_reply_id_in_raw((info or {}).get("message"))
+    except ActionFailed as exc:
+        logger.debug(f"重新获取消息以解析引用失败：{exc}")
+        return event.message_id
+
+    if reply_id is None:
+        logger.debug("未解析出引用消息，贴表情目标为触发消息本身")
+        return event.message_id
+    return reply_id
 
 
 @react.handle()
@@ -105,10 +136,11 @@ async def handle_react(
         # 参数为空或不含表情：不响应
         await react.finish()
 
+    target_id = await _resolve_target_message_id(bot, event)
     try:
         await bot.call_api(
             "set_msg_emoji_like",
-            message_id=_get_target_message_id(event),
+            message_id=target_id,
             emoji_id=_to_emoji_id(emoji),
         )
     except ActionFailed as exc:

@@ -147,4 +147,11 @@ dmypy.json
 # Localstore（LOCALSTORE_USE_CWD 数据目录）
 /data/
 
+# 部署运维手册（仅本地留档，不纳入版本控制）
+/docs/deployment.md
+
+# 部署打包产物（本地上传服务器用）
+/gbpbot.tar.gz
+/gbpbot-code.tar.gz
+
 # End of https://www.toptal.com/developers/gitignore/api/python

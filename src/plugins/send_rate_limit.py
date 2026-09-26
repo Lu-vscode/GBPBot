@@ -8,7 +8,7 @@
   每分钟限额；超出限额的发送会排队等待空位，而不是被丢弃。
 - 事件阻断（rate_limit_gate）：每分钟限额用尽后，以项目最小优先级拦截消息事件
   并停止事件传播，使所有会发送消息的插件（实名群提醒、命令、默认回复等）停止
-  运行，并按分钟节流回复一条忙碌提示（不占用发送限额）。
+  运行，并按会话节流回复忙碌提示：每个群聊/私聊每分钟至多一条，不占用发送限额。
 
 【后续开发注意】
 1. 新增会发送消息的插件无需任何适配：只要响应器优先级大于
@@ -33,7 +33,12 @@ from typing import Any, NamedTuple
 
 from nonebot import get_plugin_config, logger, on_message
 from nonebot.adapters import Bot as BaseBot
-from nonebot.adapters.onebot.v11 import Bot, MessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    GroupMessageEvent,
+    MessageEvent,
+    MessageSegment,
+)
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.matcher import Matcher
 from nonebot.plugin import PluginMetadata
@@ -136,7 +141,8 @@ _send_schedule: deque[_ScheduledSend] = deque()
 # 发送排定与登记的互斥锁：保证并发发送的间隔计算与限额判断不互相干扰
 _send_lock = asyncio.Lock()
 
-# 忙碌提示最近一次发送时间（time.monotonic），键不存在表示本进程尚未发送过
+# 忙碌提示最近一次发送时间（time.monotonic），按会话（群聊/私聊）记录：
+# 键为 group_{群号} 或 user_{QQ 号}，键不存在表示该会话本进程尚未收到过忙碌提示
 _busy_last_sent: dict[str, float] = {}
 
 # 标记"当前上下文正在发送忙碌提示"：忙碌提示不计入发送限额，不受每分钟限额
@@ -217,9 +223,19 @@ RATE_LIMIT_GATE_PRIORITY = -1000
 rate_limit_gate = on_message(priority=RATE_LIMIT_GATE_PRIORITY, block=False)
 
 
+def _session_key(event: MessageEvent) -> str:
+    """返回事件所在会话的标识：群聊按群隔离、私聊按用户隔离。
+
+    同一群聊内的不同成员共用同一条忙碌提示额度。
+    """
+    if isinstance(event, GroupMessageEvent):
+        return f"group_{event.group_id}"
+    return f"user_{event.user_id}"
+
+
 @rate_limit_gate.handle()
 async def handle_rate_limit_gate(matcher: Matcher, event: MessageEvent) -> None:
-    """每分钟限额用尽时阻断事件传播，并按分钟节流回复忙碌提示。"""
+    """每分钟限额用尽时阻断事件传播，并按会话节流回复忙碌提示。"""
     now = time.monotonic()
     _purge_expired(now)
     if sum(1 for entry in _send_schedule if not entry.is_busy) < _max_per_minute:
@@ -229,12 +245,22 @@ async def handle_rate_limit_gate(matcher: Matcher, event: MessageEvent) -> None:
     matcher.stop_propagation()
     logger.debug(f"发送频率已达上限，已阻断事件传播：{event.get_session_id()}")
 
-    last_busy_at = _busy_last_sent.get("at")
+    # 忙碌提示每个群聊/私聊每分钟至多一条且不计入限额
+    session_key = _session_key(event)
+    # 顺带清理已过期的记录，避免字典随会话数量持续增长
+    expired_keys = [
+        key
+        for key, sent_at in _busy_last_sent.items()
+        if now - sent_at >= _MINUTE_SECONDS
+    ]
+    for expired_key in expired_keys:
+        del _busy_last_sent[expired_key]
+    last_busy_at = _busy_last_sent.get(session_key)
     if last_busy_at is not None and now - last_busy_at < _MINUTE_SECONDS:
         return
 
-    # 忙碌提示每分钟至多发送一条且不计入限额；先记录时间再发送，避免并发重复
-    _busy_last_sent["at"] = now
+    # 先记录时间再发送，避免同一会话的并发事件重复回复
+    _busy_last_sent[session_key] = now
     token = _sending_busy.set(True)
     try:
         await rate_limit_gate.send(MessageSegment.text(_busy_message))
