@@ -148,7 +148,8 @@ dmypy.json
 /data/
 
 # 部署运维手册（仅本地留档，不纳入版本控制）
-/docs/deployment.md
+/docs/Help/deployment.md
+/docs/Help/operations.md
 
 # 部署打包产物（本地上传服务器用）
 /gbpbot.tar.gz
