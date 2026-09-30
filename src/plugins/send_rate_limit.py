@@ -42,7 +42,7 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.matcher import Matcher
 from nonebot.plugin import PluginMetadata
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 
 __plugin_meta__ = PluginMetadata(
     name="消息发送频率限制",
@@ -65,7 +65,8 @@ class Config(BaseModel):
     """消息发送频率限制插件配置。
 
     可在 `.env.{environment}` 文件中通过 `RATE_LIMIT_*` 系列变量配置，
-    缺失、为空或小于 1 时使用内置默认值（每分钟 9 条、每秒 1 条和内置文案）。
+    缺失、为空、无法解析为整数或小于 1 时使用内置默认值
+    （每分钟 9 条、每秒 1 条和内置文案）。
     """
 
     rate_limit_max_per_minute: int | None = None
@@ -81,10 +82,23 @@ class Config(BaseModel):
         "rate_limit_max_per_minute", "rate_limit_max_per_second", mode="before"
     )
     @classmethod
-    def blank_int_as_none(cls, value: Any) -> Any:
-        """将空字符串视为未配置，避免变量留空导致插件加载失败。"""
-        if isinstance(value, str) and not value.strip():
-            return None
+    def invalid_int_as_none(cls, value: Any, info: ValidationInfo) -> Any:
+        """将空字符串或无法解析为整数的值视为未配置。
+
+        避免变量留空或填写错误（如填成 "abc"）导致 pydantic 校验失败、
+        插件加载失败（nonebot 仅记录日志），频率限制静默失效。
+        """
+        if isinstance(value, str):
+            if not value.strip():
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                logger.warning(
+                    f"消息发送频率限制配置 {info.field_name}={value!r} "
+                    f"无法解析为整数，已视为未配置并使用默认值"
+                )
+                return None
         return value
 
 

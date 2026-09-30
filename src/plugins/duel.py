@@ -44,20 +44,24 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
 )
 
-# 决斗超时时间的默认值（分钟），以及排行榜的默认最大显示条数
+# 决斗超时时间的默认值（分钟）、排行榜的默认最大显示条数、
+# bot 消息中群昵称的最大显示长度（字符数）
 _DEFAULT_DURATION_MINUTES = 10.0
 _DEFAULT_RANK_LIMIT = 10
+_DEFAULT_NICKNAME_MAX_LENGTH = 12
 
 # 决斗超时的检查间隔（秒）：超时提示最多延迟该间隔
 _TIMEOUT_CHECK_INTERVAL_SECONDS = 30
 
-# QQ"包剪锤"表情在 OneBot v11 rps 消息段中的结果：1 石头、2 剪刀、3 布
+# QQ"包剪锤"表情的结果值（NapCat 等协议端直接透传 QQ 的 resultId）：
+# 1 剪刀、2 石头、3 布，即按"剪刀石头布"顺序编号，与常见的
+# "1 石头、2 剪刀、3 布"写法相反，胜负判定以实测值为准
 _GESTURE_CHOICES = frozenset({1, 2, 3})
 _GESTURE_TEXT_TO_VALUE = {"1": 1, "2": 2, "3": 3}
 
 # 胜负判定：(挑战者手势, 接受者手势) 在该集合中表示挑战者胜，
-# 其余非平局组合为接受者胜（石头胜剪刀、剪刀胜布、布胜石头）
-_WINNING_GESTURES = frozenset({(1, 2), (2, 3), (3, 1)})
+# 其余非平局组合为接受者胜（剪刀胜布、石头胜剪刀、布胜石头）
+_WINNING_GESTURES = frozenset({(1, 3), (2, 1), (3, 2)})
 
 # "包剪锤"表情的 QQ 表情 ID：部分协议端可能以 face 段上报，作兼容处理
 _RPS_FACE_ID = 359
@@ -110,7 +114,8 @@ class Config(BaseModel):
     """猜拳决斗插件配置。
 
     可在 `.env.{environment}` 文件中通过 `DUEL_*` 系列变量配置，
-    缺失或为空时使用默认行为（无机器人名单、超时 10 分钟、内置文案）。
+    缺失或为空时使用默认行为（无机器人名单、超时 10 分钟、
+    群昵称最长 12 字符、内置文案）。
     """
 
     duel_bot_list: Any = None
@@ -118,6 +123,9 @@ class Config(BaseModel):
 
     duel_duration: float | None = None
     """决斗的存在时间上限（分钟），超过后自动超时结束，默认 10。"""
+
+    duel_nickname_max_length: int | None = None
+    """bot 消息中群昵称的最大显示长度（字符数），超过时截断并以"…"结尾，默认 12。"""
 
     duel_text_self: str | None = None
     """向自己发起决斗时的提示文案。"""
@@ -146,7 +154,9 @@ class Config(BaseModel):
     duel_text_timeout: str | None = None
     """决斗超时结束时的提示文案，占位符 {player_a}、{player_b}。"""
 
-    @field_validator("duel_bot_list", "duel_duration", mode="before")
+    @field_validator(
+        "duel_bot_list", "duel_duration", "duel_nickname_max_length", mode="before"
+    )
     @classmethod
     def blank_as_none(cls, value: Any) -> Any:
         """将空字符串视为未配置，避免变量留空导致插件加载失败。"""
@@ -171,9 +181,27 @@ def _duration_minutes_or_default(value: float | None) -> float:
     return float(value)
 
 
+def _nickname_max_length_or_default(value: int | None) -> int:
+    """返回 bot 消息中群昵称的最大显示长度，未配置或非正数时使用默认值。"""
+    if value is None:
+        return _DEFAULT_NICKNAME_MAX_LENGTH
+    if value <= 0:
+        logger.warning(
+            f"猜拳决斗配置 DUEL_NICKNAME_MAX_LENGTH={value} 无效（需为正整数），"
+            f"已使用默认值 {_DEFAULT_NICKNAME_MAX_LENGTH}"
+        )
+        return _DEFAULT_NICKNAME_MAX_LENGTH
+    return value
+
+
 _duration_minutes = _duration_minutes_or_default(plugin_config.duel_duration)
 # 决斗超时时间（秒）
 _duration_seconds = _duration_minutes * 60.0
+
+# bot 消息中群昵称的最大显示长度（字符数）
+_nickname_max_length = _nickname_max_length_or_default(
+    plugin_config.duel_nickname_max_length
+)
 
 
 def _as_qq(value: Any) -> int | None:
@@ -363,13 +391,13 @@ class _Duel:
     """发起决斗的成员 QQ 号。"""
 
     challenger_name: str
-    """发起决斗一方的群昵称（发起时记录）。"""
+    """发起决斗一方的群昵称（发起时记录，过长时已按上限截断）。"""
 
     opponent_id: int
     """接受决斗一方的成员 QQ 号（被 @ 的成员或机器人自己）。"""
 
     opponent_name: str
-    """接受决斗一方的群昵称（发起时记录）。"""
+    """接受决斗一方的群昵称（发起时记录，过长时已按上限截断）。"""
 
     created_at: float
     """决斗创建时间（time.monotonic，用于超时判断）。"""
@@ -378,7 +406,7 @@ class _Duel:
     """对方是否已接受（等待接受时为 False，机器人自动接受时为 True）。"""
 
     gestures: dict[int, int] = field(default_factory=dict)
-    """已发送的猜拳手势：成员 QQ 号 -> 手势结果（1 石头、2 剪刀、3 布）。"""
+    """已发送的猜拳手势：成员 QQ 号 -> 手势结果（1 剪刀、2 石头、3 布）。"""
 
 
 # 进行中的决斗，按创建顺序排列（同一成员多场决斗时优先满足旧的）
@@ -442,15 +470,25 @@ def _is_rps_message(event: Event) -> bool:
     )
 
 
+def _truncate_name(name: str) -> str:
+    """截断过长的群昵称：被截断的部分以"…"代替，总长不超过配置上限。"""
+    if len(name) <= _nickname_max_length:
+        return name
+    return name[: _nickname_max_length - 1] + "…"
+
+
 def _sender_display_name(event: GroupMessageEvent) -> str:
-    """返回发送者在群内的显示名（群昵称优先，否则 QQ 昵称）。"""
+    """返回发送者在群内的显示名（群昵称优先，否则 QQ 昵称），过长时截断。"""
     card = (event.sender.card or "").strip()
     nickname = (event.sender.nickname or "").strip()
-    return card or nickname or f"QQ {event.user_id}"
+    name = card or nickname
+    if not name:
+        return f"QQ {event.user_id}"
+    return _truncate_name(name)
 
 
 async def _member_display_name(bot: Bot, group_id: int, user_id: int) -> str:
-    """获取群成员的显示名（群昵称优先），查询失败时回退为 QQ 号。"""
+    """获取群成员的显示名（群昵称优先，过长时截断），查询失败时回退为 QQ 号。"""
     try:
         member = await bot.call_api(
             "get_group_member_info",
@@ -463,7 +501,10 @@ async def _member_display_name(bot: Bot, group_id: int, user_id: int) -> str:
         return f"QQ {user_id}"
     card = str((member or {}).get("card") or "").strip()
     nickname = str((member or {}).get("nickname") or "").strip()
-    return card or nickname or f"QQ {user_id}"
+    name = card or nickname
+    if not name:
+        return f"QQ {user_id}"
+    return _truncate_name(name)
 
 
 def _parse_target(args: Message) -> int | None:
@@ -480,9 +521,10 @@ def _parse_target(args: Message) -> int | None:
 def _parse_duel_target(args: Message, event: GroupMessageEvent) -> int | None:
     """解析 /duel 的被 @ 对象，消息末尾 @机器人 被适配器剥离时返回机器人自己。
 
-    OneBot v11 适配器会把消息末尾的 @机器人 当作呼叫机器人处理并从消息中
-    删除（见适配器 _check_at_me），此时参数中已找不到该 @ 段，需要根据
-    剥离前的原始消息判断：若原始消息末尾正是 @机器人，则发起对象为机器人自己。
+    OneBot v11 适配器会把消息末尾的 @机器人（其后可跟一个纯空白文本段）
+    当作呼叫机器人处理并连同尾随空白一起删除（见适配器 _check_at_me），
+    此时参数中已找不到该 @ 段，需要根据剥离前的原始消息判断：若原始消息
+    末尾正是 @机器人（可跟一个纯空白文本段），则发起对象为机器人自己。
     """
     target = _parse_target(args)
     if target is not None:
@@ -493,6 +535,13 @@ def _parse_duel_target(args: Message, event: GroupMessageEvent) -> int | None:
     if not original:
         return None
     last = original[-1]
+    if (
+        last.type == "text"
+        and not str(last.data.get("text", "")).strip()
+        and len(original) > 1
+    ):
+        # 与适配器一致：末尾是纯空白文本段时向前看一段
+        last = original[-2]
     if last.type == "at" and str(last.data.get("qq", "")) == str(event.self_id):
         return int(event.self_id)
     return None
@@ -848,13 +897,13 @@ def _parse_rank_args(tokens: list[str]) -> tuple[bool, int, bool, int] | None:
 
 
 def _rank_entries(group_id: int, *, positive: bool) -> list[tuple[int, str, int]]:
-    """返回指定群的排行榜条目 (QQ 号, 昵称, 积分)。
+    """返回指定群的排行榜条目 (QQ 号, 昵称, 积分)，昵称过长时截断。
 
     高分榜为积分为正的成员按积分从高到低排列；低分榜为积分为负的成员
     按积分绝对值从高到低排列；积分相同时按 QQ 号升序排列。
     """
     entries = [
-        (user_id, str(record["name"]), score)
+        (user_id, _truncate_name(str(record["name"])), score)
         for user_id, record in _scores.get(group_id, {}).items()
         if (score := int(record["score"])) and (score > 0) == positive
     ]
@@ -976,7 +1025,10 @@ async def _check_duel_timeouts() -> None:
         )
 
 
-logger.info(f"猜拳决斗已启用，决斗超时时间为 {_duration_minutes:g} 分钟")
+logger.info(
+    f"猜拳决斗已启用，决斗超时时间为 {_duration_minutes:g} 分钟，"
+    f"群昵称最大显示长度为 {_nickname_max_length} 字符"
+)
 if _bot_list:
     logger.info(f"猜拳决斗机器人名单已配置（所有群通用）：{sorted(_bot_list)}")
 
