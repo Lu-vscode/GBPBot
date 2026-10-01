@@ -3,15 +3,23 @@
 当群聊中被 @ 或私聊收到消息，且没有任何插件对该消息作出响应时，
 回复默认消息。
 
-“已响应”的判定：事件处理期间，任一插件调用发送消息、贴表情等响应类
-接口（见 `_RESPONSE_APIS`）即视为已响应该消息。判定不依赖响应器的
-优先级与事件传播中的 block 设置，因此其它插件即使以 block=False 运行
-（项目惯例）并已作出响应，也不会再回复默认消息；反之，运行了但未发送
-任何消息的插件（如频率限制门、昵称合规检查）不算响应。
+“已响应”的判定（满足其一即视为已响应，不再回复默认消息）：
+1. 事件处理期间任一插件调用发送消息、贴表情等响应类接口
+   （见 `_RESPONSE_APIS`）；
+2. 任一响应器运行期间停止事件传播（matcher.stop_propagation()），
+   如频率限制网关在发送限额用尽时阻断事件：此时后续插件均未运行，
+   网关也可能不再发送忙碌提示，事件同样应被视为已被接管；否则默认
+   消息还会被发送节流排队，于滑动窗口空出后被延迟发出。
 
-实现方式：`Bot.on_calling_api` 钩子中通过 `current_event` 获取正在处理
-的事件并标记；`event_postprocessor` 在所有响应器执行完毕后（不受
-stop_propagation 影响）对未被标记且满足触发条件的事件发送默认消息。
+判定不依赖响应器的优先级与静态 block 设置：其它插件即使以
+block=False 运行（项目惯例）并已作出响应，也不会再回复默认消息；
+反之，运行了但未发送任何消息的插件（如昵称合规检查）不算响应。
+
+实现方式：`Bot.on_calling_api` 钩子（经 `current_event` 定位事件）
+与 `run_postprocessor`（检测运行期间停止传播的响应器）写入
+`_responded_events`；`event_postprocessor` 在所有响应器执行完毕后
+（不受 stop_propagation 影响）对未被标记且满足触发条件的事件发送
+默认消息。
 """
 
 from typing import Any
@@ -25,8 +33,8 @@ from nonebot.adapters.onebot.v11 import (
     PrivateMessageEvent,
 )
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
-from nonebot.matcher import current_event
-from nonebot.message import event_postprocessor
+from nonebot.matcher import Matcher, current_event
+from nonebot.message import event_postprocessor, run_postprocessor
 from nonebot.plugin import PluginMetadata
 from pydantic import BaseModel
 
@@ -65,8 +73,8 @@ _RESPONSE_APIS = frozenset(
     }
 )
 
-# 已被响应的事件集合（id(event)）：由 _mark_responded 写入，
-# 由事件后处理读取并清理，不会跨事件残留
+# 已被响应（或已被接管）的事件集合（id(event)）：由 _mark_responded
+# 与 _mark_stopped 写入，由事件后处理读取并清理，不会跨事件残留
 _responded_events: set[int] = set()
 
 
@@ -82,6 +90,23 @@ async def _mark_responded(_bot: BaseBot, api: str, _data: dict[str, Any]) -> Non
         return
     event = current_event.get(None)
     if event is not None:
+        _responded_events.add(id(event))
+
+
+@run_postprocessor
+async def _mark_stopped(matcher: Matcher, event: Event) -> None:
+    """响应器运行期间停止事件传播时，把事件标记为已被接管处理。
+
+    如频率限制网关在发送限额用尽时以 matcher.stop_propagation()
+    阻断事件传播（后续插件均不运行），此时对该事件回复默认消息既
+    无意义，又会被发送节流排队、于窗口空出后被延迟发出，因此视为
+    已响应。
+
+    运行时停止传播会把 block 写入响应器实例的属性（stop_propagation
+    及 handler 抛出 StopPropagation 的兜底处理均是如此），而响应器
+    定义时的静态 block=True 只体现在类属性上，故只检查实例字典。
+    """
+    if matcher.__dict__.get("block"):
         _responded_events.add(id(event))
 
 
