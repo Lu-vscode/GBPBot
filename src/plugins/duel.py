@@ -1,17 +1,23 @@
 """猜拳决斗插件。
 
-在群聊中发起猜拳决斗：`/duel @成员` 发起，被 @ 的成员可通过
+在群聊中发起猜拳决斗：`/duel @成员 [倍率]` 发起（倍率默认 1，上限由
+DUEL_MAX_MULTIPLIER 配置，默认 100），被 @ 的成员可通过
 `/duel.accept @成员` 接受或 `/duel.reject @成员` 拒绝；接受后双方发送
-QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者积分 +1、负者积分 -1，
-平局积分不变；各群积分相互独立，积分数据使用 localstore 长期存储在本
-地；`/duel.rank` 可查看本群积分排行榜。
+QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者积分 +倍率、负者积分
+-倍率，平局积分不变；各群积分相互独立，积分数据使用 localstore 长期
+存储在本地；`/duel.rank` 可查看本群积分排行榜，`/duel.status` 可查看
+自己在本群的决斗状态。
 
-@ 机器人自己时机器人自动接受决斗并发送猜拳表情；决斗状态保存在内存中，
-存在时间超过 DUEL_DURATION（分钟，默认 10）后自动超时结束。
+@ 机器人自己时机器人按接受概率函数（DUEL_BOT_ACCEPT_FUNC，默认 1/倍率）
+掷骰决定是否接受决斗，接受后发送猜拳表情；决斗状态保存在内存中，存在
+时间超过 DUEL_DURATION（分钟，默认 10）后自动超时结束。
 """
 
 import json
+import math
+import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,20 +41,22 @@ __plugin_meta__ = PluginMetadata(
     name="猜拳决斗",
     description="在群聊中发起猜拳决斗，由机器人判定胜负并按群记录积分，支持积分排行榜",
     usage=(
-        "/duel @成员：向群成员发起决斗\n"
+        "/duel @成员 [倍率]：向群成员发起决斗（倍率默认为 1）\n"
         "/duel.accept @成员：接受对方的决斗邀请\n"
         "/duel.reject @成员：拒绝对方的决斗邀请\n"
-        "/duel.rank (high|h (<条数>)) (low|l (<条数>))：查看本群积分排行榜"
+        "/duel.rank (high|h (<条数>)) (low|l (<条数>))：查看本群积分排行榜\n"
+        "/duel.status：查看自己在本群的决斗状态"
     ),
     type="application",
     supported_adapters={"~onebot.v11"},
 )
 
 # 决斗超时时间的默认值（分钟）、排行榜的默认最大显示条数、
-# bot 消息中群昵称的最大显示长度（字符数）
+# bot 消息中群昵称的最大显示长度（字符数）、决斗倍率上限
 _DEFAULT_DURATION_MINUTES = 10.0
 _DEFAULT_RANK_LIMIT = 10
 _DEFAULT_NICKNAME_MAX_LENGTH = 12
+_DEFAULT_MAX_MULTIPLIER = 100
 
 # 决斗超时的检查间隔（秒）：超时提示最多延迟该间隔
 _TIMEOUT_CHECK_INTERVAL_SECONDS = 30
@@ -71,33 +79,38 @@ _RPS_FACE_ID = 359
 _TEXT_DEFAULTS = {
     "self": "不能向自己发起决斗。",
     "bot": "不能向BOT发起决斗。",
-    "accepted": "{accepter} 已接受 {challenger} 的决斗邀请。\n请双方发送猜拳表情。",
-    "challenged": "{challenger} 向 {opponent} 发起决斗。",
-    "rejected": "{rejecter} 已拒绝 {challenger} 的决斗邀请。",
+    "accepted": (
+        "{accepter} 已接受 {challenger} 的决斗邀请（倍率 {multiplier}）。"
+        "\n请双方发送猜拳表情。"
+    ),
+    "challenged": "{challenger} 向 {opponent} 发起决斗（倍率 {multiplier}）。",
+    "rejected": "{rejecter} 已拒绝 {challenger} 的决斗邀请（倍率 {multiplier}）。",
     "not_challenged": "{challenger} 未向你发起决斗。",
     "win": (
-        "{winner} 在与 {loser} 的决斗中获胜。"
-        "{winner} 的积分+1，{loser} 的积分-1。决斗结束。"
+        "{winner} 在与 {loser} 的决斗（倍率 {multiplier}）中获胜。"
+        "{winner} 的积分+{multiplier}，{loser} 的积分-{multiplier}。决斗结束。"
     ),
-    "draw": "{player_a} 与 {player_b} 的决斗平局。双方积分不变。决斗结束。",
-    "timeout": "{player_a} 与 {player_b} 的决斗超时结束。",
+    "draw": (
+        "{player_a} 与 {player_b} 的决斗（倍率 {multiplier}）平局。"
+        "双方积分不变。决斗结束。"
+    ),
+    "timeout": "{player_a} 与 {player_b} 的决斗（倍率 {multiplier}）超时结束。",
 }
 
 # 每条文案允许使用的占位符，启动时校验配置的文案与占位符是否匹配
 _TEXT_FIELDS = {
     "self": (),
     "bot": (),
-    "accepted": ("accepter", "challenger"),
-    "challenged": ("challenger", "opponent"),
-    "rejected": ("rejecter", "challenger"),
+    "accepted": ("accepter", "challenger", "multiplier"),
+    "challenged": ("challenger", "opponent", "multiplier"),
+    "rejected": ("rejecter", "challenger", "multiplier"),
     "not_challenged": ("challenger",),
-    "win": ("winner", "loser"),
-    "draw": ("player_a", "player_b"),
-    "timeout": ("player_a", "player_b"),
+    "win": ("winner", "loser", "multiplier"),
+    "draw": ("player_a", "player_b", "multiplier"),
+    "timeout": ("player_a", "player_b", "multiplier"),
 }
 
 # 文档未定义的边界情况文案（用法与错误提示），不支持配置
-_USAGE_DUEL = "请 @ 要发起决斗的群成员，用法：/duel @群成员"
 _USAGE_ACCEPT = "请 @ 发起决斗的群成员，用法：/duel.accept @群成员"
 _USAGE_REJECT = "请 @ 发起决斗的群成员，用法：/duel.reject @群成员"
 _USAGE_RANK = (
@@ -105,8 +118,8 @@ _USAGE_RANK = (
     "条数需为正整数且默认为 10"
 )
 _PAIR_ACTIVE = "你们之间已有一场进行中的决斗，请等待该决斗结束或超时后再发起。"
-_RANK_TITLE_HIGH = "决斗积分高分榜"
-_RANK_TITLE_LOW = "决斗积分低分榜"
+_RANK_TITLE_HIGH = "决斗高分榜"
+_RANK_TITLE_LOW = "决斗低分榜"
 _RANK_EMPTY = "（暂无）"
 
 
@@ -115,7 +128,7 @@ class Config(BaseModel):
 
     可在 `.env.{environment}` 文件中通过 `DUEL_*` 系列变量配置，
     缺失或为空时使用默认行为（无机器人名单、超时 10 分钟、
-    群昵称最长 12 字符、内置文案）。
+    群昵称最长 12 字符、倍率上限 100、接受概率 1/倍率、内置文案）。
     """
 
     duel_bot_list: Any = None
@@ -126,6 +139,12 @@ class Config(BaseModel):
 
     duel_nickname_max_length: int | None = None
     """bot 消息中群昵称的最大显示长度（字符数），超过时截断并以"…"结尾，默认 12。"""
+
+    duel_max_multiplier: int | None = None
+    """决斗倍率的上限（正整数），默认 100。"""
+
+    duel_bot_accept_func: str | None = None
+    """机器人接受决斗的概率函数表达式（变量 x 为倍率），默认 1/x。"""
 
     duel_text_self: str | None = None
     """向自己发起决斗时的提示文案。"""
@@ -155,7 +174,12 @@ class Config(BaseModel):
     """决斗超时结束时的提示文案，占位符 {player_a}、{player_b}。"""
 
     @field_validator(
-        "duel_bot_list", "duel_duration", "duel_nickname_max_length", mode="before"
+        "duel_bot_list",
+        "duel_duration",
+        "duel_nickname_max_length",
+        "duel_max_multiplier",
+        "duel_bot_accept_func",
+        mode="before",
     )
     @classmethod
     def blank_as_none(cls, value: Any) -> Any:
@@ -201,6 +225,86 @@ _duration_seconds = _duration_minutes * 60.0
 # bot 消息中群昵称的最大显示长度（字符数）
 _nickname_max_length = _nickname_max_length_or_default(
     plugin_config.duel_nickname_max_length
+)
+
+
+def _max_multiplier_or_default(value: int | None) -> int:
+    """返回决斗倍率的上限，未配置或非正数时使用默认值。"""
+    if value is None:
+        return _DEFAULT_MAX_MULTIPLIER
+    if value <= 0:
+        logger.warning(
+            f"猜拳决斗配置 DUEL_MAX_MULTIPLIER={value} 无效（需为正整数），"
+            f"已使用默认值 {_DEFAULT_MAX_MULTIPLIER}"
+        )
+        return _DEFAULT_MAX_MULTIPLIER
+    return value
+
+
+_max_multiplier = _max_multiplier_or_default(plugin_config.duel_max_multiplier)
+
+
+def _default_bot_accept_probability(multiplier: int) -> float:
+    """默认的机器人接受决斗概率函数：接受概率为 1/倍率。"""
+    return 1 / multiplier
+
+
+def _bot_accept_func_or_default(expr: str | None) -> Callable[[int], float]:
+    """解析机器人接受决斗的概率函数，无效时报错并使用默认函数。
+
+    配置为 Python 表达式（变量 x 为倍率）；当表达式无法求值，或在倍率
+    取值范围 1..上限 内存在小于 0 或大于 1 的概率时，记录错误并回退
+    默认函数 1/倍率。
+    """
+    text = (expr or "").strip()
+    if not text:
+        return _default_bot_accept_probability
+    try:
+        code = compile(text, "<DUEL_BOT_ACCEPT_FUNC>", "eval")
+    except (SyntaxError, ValueError) as exc:
+        logger.error(
+            f"猜拳决斗配置 DUEL_BOT_ACCEPT_FUNC={text!r} 无法解析（{exc}），"
+            "已使用默认函数 1/倍率"
+        )
+        return _default_bot_accept_probability
+
+    def accept_probability(multiplier: int) -> float:
+        return float(eval(code, {"__builtins__": {}}, {"x": multiplier}))
+
+    for x in range(1, _max_multiplier + 1):
+        try:
+            probability = accept_probability(x)
+        except (
+            ArithmeticError,
+            AttributeError,
+            NameError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.error(
+                f"猜拳决斗配置 DUEL_BOT_ACCEPT_FUNC={text!r} 在倍率 {x} 时"
+                f"求值失败（{exc}），已使用默认函数 1/倍率"
+            )
+            return _default_bot_accept_probability
+        if not 0.0 <= probability <= 1.0:
+            logger.error(
+                f"猜拳决斗配置 DUEL_BOT_ACCEPT_FUNC={text!r} 在倍率 {x} 时概率为"
+                f" {probability}（需在 0~1 之间），已使用默认函数 1/倍率"
+            )
+            return _default_bot_accept_probability
+    logger.info(f"机器人接受决斗的概率函数已配置：{text}")
+    return accept_probability
+
+
+# 机器人接受决斗的概率函数：倍率 -> 接受概率
+_bot_accept_probability = _bot_accept_func_or_default(
+    plugin_config.duel_bot_accept_func
+)
+
+# /duel 的用法提示（倍率上限可配置，需在解析配置后构建）
+_USAGE_DUEL = (
+    "请 @ 要发起决斗的群成员，用法：/duel @群成员 [倍率]，"
+    f"倍率需为不超过 {_max_multiplier} 的正整数，默认为 1"
 )
 
 
@@ -270,7 +374,7 @@ _texts = {
 }
 
 
-def _text(key: str, **kwargs: str) -> str:
+def _text(key: str, **kwargs: Any) -> str:
     """取出文案并填充占位符。"""
     return _texts[key].format(**kwargs)
 
@@ -399,11 +503,14 @@ class _Duel:
     opponent_name: str
     """接受决斗一方的群昵称（发起时记录，过长时已按上限截断）。"""
 
+    multiplier: int
+    """决斗倍率：胜者积分 +倍率、败者积分 -倍率。"""
+
     created_at: float
     """决斗创建时间（time.monotonic，用于超时判断）。"""
 
     accepted: bool = False
-    """对方是否已接受（等待接受时为 False，机器人自动接受时为 True）。"""
+    """对方是否已接受（等待接受时为 False，机器人已掷骰接受时为 True）。"""
 
     gestures: dict[int, int] = field(default_factory=dict)
     """已发送的猜拳手势：成员 QQ 号 -> 手势结果（1 剪刀、2 石头、3 布）。"""
@@ -505,6 +612,17 @@ async def _member_display_name(bot: Bot, group_id: int, user_id: int) -> str:
     if not name:
         return f"QQ {user_id}"
     return _truncate_name(name)
+
+
+def _parse_multiplier(args: Message) -> int | None:
+    """从命令参数中解析决斗倍率，未提供时返回 1，无效时返回 None。"""
+    tokens = args.extract_plain_text().split()
+    if not tokens:
+        return 1
+    if len(tokens) > 1 or not tokens[0].isdigit():
+        return None
+    value = int(tokens[0])
+    return value if 1 <= value <= _max_multiplier else None
 
 
 def _parse_target(args: Message) -> int | None:
@@ -699,23 +817,31 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
                 "draw",
                 player_a=duel.challenger_name,
                 player_b=duel.opponent_name,
+                multiplier=duel.multiplier,
             ),
         )
         return
     winner_id, winner_name, loser_id, loser_name = result
-    _update_score(duel.group_id, winner_id, winner_name, 1)
-    _update_score(duel.group_id, loser_id, loser_name, -1)
+    _update_score(duel.group_id, winner_id, winner_name, duel.multiplier)
+    _update_score(duel.group_id, loser_id, loser_name, -duel.multiplier)
     logger.info(
         f"群 {duel.group_id} 的决斗中 {winner_id}（{winner_name}）获胜，"
         f"{loser_id}（{loser_name}）落败"
     )
     await _send_text(
-        bot, duel.group_id, _text("win", winner=winner_name, loser=loser_name)
+        bot,
+        duel.group_id,
+        _text(
+            "win",
+            winner=winner_name,
+            loser=loser_name,
+            multiplier=duel.multiplier,
+        ),
     )
 
 
 async def _send_bot_rps(bot: Bot, duel: _Duel) -> None:
-    """机器人自动接受决斗后发送猜拳表情，并记录机器人自己的手势。
+    """机器人接受决斗后发送猜拳表情，并记录机器人自己的手势。
 
     发送猜拳表情无法指定结果、发送接口也不返回结果，需在发送后通过
     get_msg 查询该消息读取实际结果；查询失败时等待协议端上报该消息。
@@ -746,9 +872,10 @@ duel_cmd = on_command("duel", rule=is_type(GroupMessageEvent))
 async def handle_duel(
     bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
 ) -> None:
-    """处理 /duel 命令：向群成员发起决斗。"""
+    """处理 /duel 命令：向群成员发起决斗（可指定倍率）。"""
     target = _parse_duel_target(args, event)
-    if target is None:
+    multiplier = _parse_multiplier(args)
+    if target is None or multiplier is None:
         await _send_text(bot, event.group_id, _USAGE_DUEL, reply_to=event.message_id)
         return
     if target == event.user_id:
@@ -773,30 +900,62 @@ async def handle_duel(
         challenger_name=challenger_name,
         opponent_id=target,
         opponent_name=opponent_name,
+        multiplier=multiplier,
         created_at=time.monotonic(),
-        accepted=target == bot_id,
+        accepted=False,
     )
+    if target == bot_id:
+        # @ 的是机器人自己：按接受概率函数掷骰决定是否接受，
+        # 拒绝时不登记决斗状态
+        accepts = random.random() < _bot_accept_probability(multiplier)
+        if not accepts:
+            logger.info(
+                f"群 {event.group_id} 成员 {event.user_id}（{challenger_name}）"
+                f"向机器人发起决斗（倍率 {multiplier}），机器人拒绝"
+            )
+            await _send_text(
+                bot,
+                event.group_id,
+                _text(
+                    "rejected",
+                    rejecter=opponent_name,
+                    challenger=challenger_name,
+                    multiplier=multiplier,
+                ),
+            )
+            return
+        duel.accepted = True
     # 先保存决斗状态再发送文案：发送可能因频率限制排队，期间对方
     # 提前发送的猜拳表情也必须能被记录
     _duels.append(duel)
     logger.info(
         f"群 {event.group_id} 成员 {event.user_id}（{challenger_name}）"
-        f"向 {target}（{opponent_name}）发起决斗"
+        f"向 {target}（{opponent_name}）发起决斗（倍率 {multiplier}）"
     )
 
     if duel.accepted:
-        # @ 的是机器人自己：自动接受，并由机器人发出猜拳表情
+        # @ 的是机器人自己：掷骰接受，并由机器人发出猜拳表情
         await _send_text(
             bot,
             event.group_id,
-            _text("accepted", accepter=opponent_name, challenger=challenger_name),
+            _text(
+                "accepted",
+                accepter=opponent_name,
+                challenger=challenger_name,
+                multiplier=multiplier,
+            ),
         )
         await _send_bot_rps(bot, duel)
     else:
         await _send_text(
             bot,
             event.group_id,
-            _text("challenged", challenger=challenger_name, opponent=opponent_name),
+            _text(
+                "challenged",
+                challenger=challenger_name,
+                opponent=opponent_name,
+                multiplier=multiplier,
+            ),
         )
 
 
@@ -830,7 +989,12 @@ async def handle_duel_accept(
     await _send_text(
         bot,
         event.group_id,
-        _text("accepted", accepter=accepter_name, challenger=duel.challenger_name),
+        _text(
+            "accepted",
+            accepter=accepter_name,
+            challenger=duel.challenger_name,
+            multiplier=duel.multiplier,
+        ),
     )
 
 
@@ -862,7 +1026,12 @@ async def handle_duel_reject(
     await _send_text(
         bot,
         event.group_id,
-        _text("rejected", rejecter=rejecter_name, challenger=duel.challenger_name),
+        _text(
+            "rejected",
+            rejecter=rejecter_name,
+            challenger=duel.challenger_name,
+            multiplier=duel.multiplier,
+        ),
     )
 
 
@@ -965,6 +1134,63 @@ async def handle_duel_rank(
     await _send_text(bot, event.group_id, "\n\n".join(sections))
 
 
+def _status_lines(group_id: int, user_id: int) -> list[str]:
+    """生成成员在本群进行中决斗的状态描述行（按创建顺序）。"""
+    now = time.monotonic()
+    lines: list[str] = []
+    for duel in _duels:
+        if duel.group_id != group_id:
+            continue
+        if user_id not in (duel.challenger_id, duel.opponent_id):
+            continue
+        remaining = max(0, math.ceil((duel.created_at + _duration_seconds - now) / 60))
+        suffix = f"距超时约 {remaining} 分钟"
+        if not duel.accepted:
+            if user_id == duel.challenger_id:
+                lines.append(
+                    f"你向 {duel.opponent_name} 发起的决斗"
+                    f"（倍率 {duel.multiplier}）：等待对方接受，{suffix}。"
+                )
+            else:
+                lines.append(
+                    f"{duel.challenger_name} 向你发起的决斗"
+                    f"（倍率 {duel.multiplier}）：等待你接受"
+                    f"（可使用 /duel.accept 接受），{suffix}。"
+                )
+            continue
+        other_name = (
+            duel.opponent_name
+            if user_id == duel.challenger_id
+            else duel.challenger_name
+        )
+        if user_id not in duel.gestures:
+            state = "等待你发送猜拳表情"
+        else:
+            state = "你已出拳，等待对方发送猜拳表情"
+        lines.append(
+            f"你与 {other_name} 的决斗（倍率 {duel.multiplier}）：{state}，{suffix}。"
+        )
+    return lines
+
+
+duel_status_cmd = on_command("duel.status", rule=is_type(GroupMessageEvent))
+
+
+@duel_status_cmd.handle()
+async def handle_duel_status(bot: Bot, event: GroupMessageEvent) -> None:
+    """处理 /duel.status 命令：显示发送者在本群的决斗状态。"""
+    lines = _status_lines(event.group_id, event.user_id)
+    if not lines:
+        await _send_text(bot, event.group_id, "你在本群没有进行中的决斗。")
+        return
+    numbered = [f"{index}. {line}" for index, line in enumerate(lines, start=1)]
+    await _send_text(
+        bot,
+        event.group_id,
+        "\n".join([f"你在本群有 {len(lines)} 场进行中的决斗：", *numbered]),
+    )
+
+
 # 优先级 0 且不阻断事件传播：检测群成员的猜拳表情并更新决斗状态，
 # 不影响其它插件（命令、默认回复等）继续处理消息
 duel_gesture = on_message(priority=0, block=False, rule=_is_rps_message)
@@ -1021,13 +1247,15 @@ async def _check_duel_timeouts() -> None:
                 "timeout",
                 player_a=duel.challenger_name,
                 player_b=duel.opponent_name,
+                multiplier=duel.multiplier,
             ),
         )
 
 
 logger.info(
     f"猜拳决斗已启用，决斗超时时间为 {_duration_minutes:g} 分钟，"
-    f"群昵称最大显示长度为 {_nickname_max_length} 字符"
+    f"群昵称最大显示长度为 {_nickname_max_length} 字符，"
+    f"倍率上限为 {_max_multiplier}"
 )
 if _bot_list:
     logger.info(f"猜拳决斗机器人名单已配置（所有群通用）：{sorted(_bot_list)}")
