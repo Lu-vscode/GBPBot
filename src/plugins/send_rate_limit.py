@@ -7,8 +7,10 @@
   保证任意两条消息的间隔不小于每秒限额、滑动 60 秒窗口内的普通消息条数不超过
   每分钟限额；超出限额的发送会排队等待空位，而不是被丢弃。
 - 事件阻断（rate_limit_gate）：每分钟限额用尽后，以项目最小优先级拦截消息事件
-  并停止事件传播，使所有会发送消息的插件（实名群提醒、命令等）停止运行，
-  并按会话节流回复忙碌提示：每个群聊/私聊每分钟至多一条，不占用发送限额。
+  并停止事件传播，使所有会发送消息的插件（实名群提醒、命令等）停止运行。
+  此时仅当消息指向机器人时才回复忙碌提示：群聊 @机器人 或以命令前缀
+  （COMMAND_START）开头、私聊任意消息，引用机器人消息不算。忙碌提示每个
+  群聊/私聊每分钟至多一条，不占用发送限额。
 
 【后续开发注意】
 1. 新增会发送消息的插件无需任何适配：只要响应器优先级大于
@@ -31,13 +33,14 @@ from collections import deque
 from contextvars import ContextVar
 from typing import Any, NamedTuple
 
-from nonebot import get_plugin_config, logger, on_message
+from nonebot import get_driver, get_plugin_config, logger, on_message
 from nonebot.adapters import Bot as BaseBot
 from nonebot.adapters.onebot.v11 import (
     Bot,
     GroupMessageEvent,
     MessageEvent,
     MessageSegment,
+    PrivateMessageEvent,
 )
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.matcher import Matcher
@@ -131,6 +134,9 @@ _max_per_second = _positive_int_or_default(
 _busy_message = (
     plugin_config.rate_limit_busy_message or ""
 ).strip() or _DEFAULT_BUSY_MESSAGE
+
+# 命令前缀集合（COMMAND_START）：用于判断群聊消息是否以指令开头
+_command_start = set(get_driver().config.command_start)
 
 # 相邻两条消息的最小发送间隔（秒），由每秒限额换算得到
 _min_interval = _SECOND_SECONDS / _max_per_second
@@ -247,6 +253,28 @@ def _session_key(event: MessageEvent) -> str:
     return f"user_{event.user_id}"
 
 
+def _directed_to_bot(event: MessageEvent) -> bool:
+    """判断消息是否指向机器人，以此决定是否回复忙碌提示。
+
+    私聊消息始终视为与机器人对话；群聊消息仅当包含 @机器人 或以命令前缀
+    （COMMAND_START）开头时才视为对话。注意：不能直接用 event.is_tome()——
+    引用机器人消息会被适配器一并标记为 to_me；@机器人 也不能看处理后的消息，
+    因为适配器会移除消息首尾的 @机器人 段，故这里检查 original_message。
+    引用机器人消息本身既不含 @机器人、也不以命令前缀开头，不会收到忙碌提示。
+    """
+    if isinstance(event, PrivateMessageEvent):
+        return True
+    if not isinstance(event, GroupMessageEvent):
+        return False
+    if any(
+        segment.type == "at" and str(segment.data.get("qq")) == str(event.self_id)
+        for segment in event.original_message
+    ):
+        return True
+    text = event.get_plaintext().lstrip()
+    return any(text.startswith(prefix) for prefix in _command_start)
+
+
 @rate_limit_gate.handle()
 async def handle_rate_limit_gate(matcher: Matcher, event: MessageEvent) -> None:
     """每分钟限额用尽时阻断事件传播，并按会话节流回复忙碌提示。"""
@@ -258,6 +286,11 @@ async def handle_rate_limit_gate(matcher: Matcher, event: MessageEvent) -> None:
     # 限额已用尽：停止事件传播，后续优先级的插件都不会运行
     matcher.stop_propagation()
     logger.debug(f"发送频率已达上限，已阻断事件传播：{event.get_session_id()}")
+
+    # 仅当消息指向机器人时才回复忙碌提示：群聊 @机器人 或以命令前缀开头、
+    # 私聊任意消息；群聊中的普通聊天与引用机器人消息只阻断、不回复
+    if not _directed_to_bot(event):
+        return
 
     # 忙碌提示每个群聊/私聊每分钟至多一条且不计入限额
     session_key = _session_key(event)

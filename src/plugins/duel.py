@@ -31,6 +31,7 @@ from nonebot.adapters.onebot.v11 import (
 )
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.params import CommandArg
+from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata
 from nonebot.rule import is_type
 from nonebot_plugin_apscheduler import scheduler
@@ -117,6 +118,8 @@ _USAGE_RANK = (
     "参数无法识别，用法：/duel.rank (high|h (<条数>)) (low|l (<条数>))，"
     "条数需为正整数且默认为 10"
 )
+_USAGE_STATUS = "参数无法识别，用法：/duel.status"
+_STATUS_ALL_DENIED = "查看本群全部决斗状态仅超级用户可用。"
 _PAIR_ACTIVE = "你们之间已有一场进行中的决斗，请等待该决斗结束或超时后再发起。"
 _RANK_TITLE_HIGH = "决斗高分榜"
 _RANK_TITLE_LOW = "决斗低分榜"
@@ -1134,6 +1137,12 @@ async def handle_duel_rank(
     await _send_text(bot, event.group_id, "\n\n".join(sections))
 
 
+def _remaining_text(duel: _Duel, now: float) -> str:
+    """返回决斗的剩余超时描述，如"距超时约 10 分钟"。"""
+    remaining = max(0, math.ceil((duel.created_at + _duration_seconds - now) / 60))
+    return f"距超时约 {remaining} 分钟"
+
+
 def _status_lines(group_id: int, user_id: int) -> list[str]:
     """生成成员在本群进行中决斗的状态描述行（按创建顺序）。"""
     now = time.monotonic()
@@ -1143,8 +1152,7 @@ def _status_lines(group_id: int, user_id: int) -> list[str]:
             continue
         if user_id not in (duel.challenger_id, duel.opponent_id):
             continue
-        remaining = max(0, math.ceil((duel.created_at + _duration_seconds - now) / 60))
-        suffix = f"距超时约 {remaining} 分钟"
+        suffix = _remaining_text(duel, now)
         if not duel.accepted:
             if user_id == duel.challenger_id:
                 lines.append(
@@ -1176,19 +1184,73 @@ def _status_lines(group_id: int, user_id: int) -> list[str]:
 duel_status_cmd = on_command("duel.status", rule=is_type(GroupMessageEvent))
 
 
+def _all_status_lines(group_id: int) -> list[str]:
+    """生成本群全部进行中决斗的状态描述行（按创建顺序）。"""
+    now = time.monotonic()
+    lines: list[str] = []
+    for duel in _duels:
+        if duel.group_id != group_id:
+            continue
+        suffix = _remaining_text(duel, now)
+        if not duel.accepted:
+            lines.append(
+                f"{duel.challenger_name} 向 {duel.opponent_name} 发起的决斗"
+                f"（倍率 {duel.multiplier}）：等待对方接受，{suffix}。"
+            )
+            continue
+        players = (
+            (duel.challenger_id, duel.challenger_name),
+            (duel.opponent_id, duel.opponent_name),
+        )
+        pending_names = [name for uid, name in players if uid not in duel.gestures]
+        if len(pending_names) == 1:
+            state = f"等待 {pending_names[0]} 发送猜拳表情"
+        else:
+            # 双方都未出拳（双方均已出拳时会立即结算，不会留在列表中）
+            state = "等待双方发送猜拳表情"
+        lines.append(
+            f"{duel.challenger_name} 与 {duel.opponent_name} 的决斗"
+            f"（倍率 {duel.multiplier}）：{state}，{suffix}。"
+        )
+    return lines
+
+
+def _parse_status_args(tokens: list[str]) -> str | None:
+    """解析 /duel.status 命令参数，返回 "self"、"all" 或 None（无法识别）。"""
+    if not tokens:
+        return "self"
+    if len(tokens) == 1 and tokens[0] in {"all", "a"}:
+        return "all"
+    return None
+
+
 @duel_status_cmd.handle()
-async def handle_duel_status(bot: Bot, event: GroupMessageEvent) -> None:
-    """处理 /duel.status 命令：显示发送者在本群的决斗状态。"""
-    lines = _status_lines(event.group_id, event.user_id)
+async def handle_duel_status(
+    bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
+) -> None:
+    """处理 /duel.status 命令：显示自己或（超级用户）本群全部的决斗状态。"""
+    scope = _parse_status_args(args.extract_plain_text().lower().split())
+    if scope is None:
+        await _send_text(bot, event.group_id, _USAGE_STATUS, reply_to=event.message_id)
+        return
+    if scope == "all":
+        if not await SUPERUSER(bot, event):
+            await _send_text(
+                bot, event.group_id, _STATUS_ALL_DENIED, reply_to=event.message_id
+            )
+            return
+        lines = _all_status_lines(event.group_id)
+        empty_text = "本群没有进行中的决斗。"
+        header = f"本群有 {len(lines)} 场进行中的决斗："
+    else:
+        lines = _status_lines(event.group_id, event.user_id)
+        empty_text = "你在本群没有进行中的决斗。"
+        header = f"你在本群有 {len(lines)} 场进行中的决斗："
     if not lines:
-        await _send_text(bot, event.group_id, "你在本群没有进行中的决斗。")
+        await _send_text(bot, event.group_id, empty_text)
         return
     numbered = [f"{index}. {line}" for index, line in enumerate(lines, start=1)]
-    await _send_text(
-        bot,
-        event.group_id,
-        "\n".join([f"你在本群有 {len(lines)} 场进行中的决斗：", *numbered]),
-    )
+    await _send_text(bot, event.group_id, "\n".join([header, *numbered]))
 
 
 # 优先级 0 且不阻断事件传播：检测群成员的猜拳表情并更新决斗状态，
