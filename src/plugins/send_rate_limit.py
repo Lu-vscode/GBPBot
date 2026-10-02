@@ -1,13 +1,13 @@
 """消息发送频率限制插件。
 
-统一限制机器人发送消息的频率（默认每分钟最多 9 条、每秒最多 1 条），
-由两层机制协作实现：
+统一限制机器人发送消息的频率（默认每分钟最多 9 条、每秒最多 1 条、
+每小时最多 100 条），由两层机制协作实现：
 
 - 发送节流（Bot.call_api 钩子）：拦截所有发送类接口，为每次发送排定发送时间，
-  保证任意两条消息的间隔不小于每秒限额、滑动 60 秒窗口内的普通消息条数不超过
-  每分钟限额；超出限额的发送会排队等待空位，而不是被丢弃。
-- 事件阻断（rate_limit_gate）：每分钟限额用尽后，以项目最小优先级拦截消息事件
-  并停止事件传播，使所有会发送消息的插件（实名群提醒、命令等）停止运行。
+  保证任意两条消息的间隔不小于每秒限额、滑动 60 秒与 3600 秒窗口内的普通消息
+  条数分别不超过每分钟与每小时限额；超出限额的发送会排队等待空位，而不是被丢弃。
+- 事件阻断（rate_limit_gate）：每分钟或每小时限额用尽后，以项目最小优先级拦截
+  消息事件并停止事件传播，使所有会发送消息的插件（实名群提醒、命令等）停止运行。
   此时仅当消息指向机器人时才回复忙碌提示：群聊 @机器人 或以命令前缀
   （COMMAND_START）开头、私聊任意消息，引用机器人消息不算。忙碌提示每个
   群聊/私聊每分钟至多一条，不占用发送限额。
@@ -49,7 +49,7 @@ from pydantic import BaseModel, ValidationInfo, field_validator
 
 __plugin_meta__ = PluginMetadata(
     name="消息发送频率限制",
-    description="统一限制机器人发送消息的频率，达到每分钟上限时阻断其他插件并回复忙碌提示",
+    description="统一限制机器人发送消息的频率，达到上限时阻断其他插件并回复忙碌提示",
     usage="自动生效，无触发指令；可通过 RATE_LIMIT_* 环境变量配置",
     type="application",
     supported_adapters={"~onebot.v11"},
@@ -58,10 +58,12 @@ __plugin_meta__ = PluginMetadata(
 # 发送频率限制的默认值（配置缺失、为空或无效时使用）
 _DEFAULT_MAX_PER_MINUTE = 9
 _DEFAULT_MAX_PER_SECOND = 1
+_DEFAULT_MAX_PER_HOUR = 100
 _DEFAULT_BUSY_MESSAGE = "Bot忙，请稍后再试。"
 
 _MINUTE_SECONDS = 60.0
 _SECOND_SECONDS = 1.0
+_HOUR_SECONDS = 3600.0
 
 
 class Config(BaseModel):
@@ -69,7 +71,7 @@ class Config(BaseModel):
 
     可在 `.env.{environment}` 文件中通过 `RATE_LIMIT_*` 系列变量配置，
     缺失、为空、无法解析为整数或小于 1 时使用内置默认值
-    （每分钟 9 条、每秒 1 条和内置文案）。
+    （每分钟 9 条、每秒 1 条、每小时 100 条和内置文案）。
     """
 
     rate_limit_max_per_minute: int | None = None
@@ -78,11 +80,17 @@ class Config(BaseModel):
     rate_limit_max_per_second: int | None = None
     """每秒允许发送的最大消息数（决定相邻两条消息的最小发送间隔），默认 1。"""
 
+    rate_limit_max_per_hour: int | None = None
+    """滑动 3600 秒窗口内允许发送的最大消息数，默认 100。"""
+
     rate_limit_busy_message: str | None = None
     """发送频率达到上限后回复的忙碌提示文案，默认"Bot忙，请稍后再试。"。"""
 
     @field_validator(
-        "rate_limit_max_per_minute", "rate_limit_max_per_second", mode="before"
+        "rate_limit_max_per_minute",
+        "rate_limit_max_per_second",
+        "rate_limit_max_per_hour",
+        mode="before",
     )
     @classmethod
     def invalid_int_as_none(cls, value: Any, info: ValidationInfo) -> Any:
@@ -131,6 +139,11 @@ _max_per_second = _positive_int_or_default(
     _DEFAULT_MAX_PER_SECOND,
     "RATE_LIMIT_MAX_PER_SECOND",
 )
+_max_per_hour = _positive_int_or_default(
+    plugin_config.rate_limit_max_per_hour,
+    _DEFAULT_MAX_PER_HOUR,
+    "RATE_LIMIT_MAX_PER_HOUR",
+)
 _busy_message = (
     plugin_config.rate_limit_busy_message or ""
 ).strip() or _DEFAULT_BUSY_MESSAGE
@@ -143,7 +156,7 @@ _min_interval = _SECOND_SECONDS / _max_per_second
 
 logger.info(
     f"消息发送频率限制已启用：每分钟最多 {_max_per_minute} 条、"
-    f"每秒最多 {_max_per_second} 条"
+    f"每秒最多 {_max_per_second} 条、每小时最多 {_max_per_hour} 条"
 )
 
 
@@ -154,8 +167,8 @@ class _ScheduledSend(NamedTuple):
     is_busy: bool
 
 
-# 发送排定表：按排定时间升序记录滑动 60 秒窗口内已发出与排队中的全部发送，
-# 超窗条目会被清理。所有发送（含忙碌提示）都经它排定，保证发送间隔。
+# 发送排定表：按排定时间升序记录最长窗口（1 小时）内已发出与排队中的全部
+# 发送，移出窗口的条目会被清理。所有发送（含忙碌提示）都经它排定，保证间隔。
 _send_schedule: deque[_ScheduledSend] = deque()
 
 # 发送排定与登记的互斥锁：保证并发发送的间隔计算与限额判断不互相干扰
@@ -165,8 +178,8 @@ _send_lock = asyncio.Lock()
 # 键为 group_{群号} 或 user_{QQ 号}，键不存在表示该会话本进程尚未收到过忙碌提示
 _busy_last_sent: dict[str, float] = {}
 
-# 标记"当前上下文正在发送忙碌提示"：忙碌提示不计入发送限额，不受每分钟限额
-# 阻塞（但仍遵守发送间隔）
+# 标记"当前上下文正在发送忙碌提示"：忙碌提示不计入发送限额，不受每分钟与
+# 每小时限额阻塞（但仍遵守发送间隔）
 _sending_busy: ContextVar[bool] = ContextVar("rate_limit_sending_busy", default=False)
 
 # OneBot v11 中会发出消息的 API；其他接口（如贴表情、上传文件）不受频率限制。
@@ -184,17 +197,31 @@ _SEND_APIS = frozenset(
 
 
 def _purge_expired(now: float) -> None:
-    """清理发送排定表中已移出滑动 60 秒窗口的条目。"""
-    while _send_schedule and now - _send_schedule[0].at >= _MINUTE_SECONDS:
+    """清理发送排定表中已移出最长窗口（1 小时）的条目。"""
+    while _send_schedule and now - _send_schedule[0].at >= _HOUR_SECONDS:
         _send_schedule.popleft()
+
+
+def _committed_within(reference: float, window: float) -> list[_ScheduledSend]:
+    """返回排定时间晚于 reference - window 的普通消息（不含忙碌提示）。
+
+    用于统计滑动窗口内已消耗或已排队的限额；发送排定表按排定时间升序，
+    返回列表的首项即窗口内最早的一条。
+    """
+    return [
+        entry
+        for entry in _send_schedule
+        if not entry.is_busy and entry.at > reference - window
+    ]
 
 
 def _reserve_send_time(now: float, *, is_busy: bool) -> float:
     """为一次发送排定时间并登记，返回排定的 monotonic 发送时间。
 
-    需在 `_send_lock` 内调用。排定时间满足两个约束：与上一条发送的间隔不小于
-    每秒限额换算的最小间隔；普通消息（非忙碌提示）排定后的滑动 60 秒窗口内
-    条数不超过每分钟限额。不满足时按"排队等待"向后顺延，而不是丢弃。
+    需在 `_send_lock` 内调用。排定时间满足三个约束：与上一条发送的间隔不小
+    于每秒限额换算的最小间隔；普通消息（非忙碌提示）排定后的滑动 60 秒与
+    3600 秒窗口内条数分别不超过每分钟与每小时限额。不满足时按"排队等待"
+    向后顺延，而不是丢弃。
     """
     _purge_expired(now)
     scheduled = now
@@ -203,15 +230,17 @@ def _reserve_send_time(now: float, *, is_busy: bool) -> float:
             scheduled = max(scheduled, _send_schedule[-1].at + _min_interval)
         if is_busy:
             break
-        committed = [
-            entry
-            for entry in _send_schedule
-            if not entry.is_busy and entry.at > scheduled - _MINUTE_SECONDS
-        ]
-        if len(committed) < _max_per_minute:
-            break
-        # 窗口已满：顺延到窗口内最早一条普通消息移出窗口之后再重新检查
-        scheduled = committed[0].at + _MINUTE_SECONDS
+        minute_committed = _committed_within(scheduled, _MINUTE_SECONDS)
+        if len(minute_committed) >= _max_per_minute:
+            # 每分钟窗口已满：顺延到窗口内最早一条普通消息移出窗口后重查
+            scheduled = minute_committed[0].at + _MINUTE_SECONDS
+            continue
+        hour_committed = _committed_within(scheduled, _HOUR_SECONDS)
+        if len(hour_committed) >= _max_per_hour:
+            # 每小时窗口已满：同理顺延到最早一条移出小时窗口
+            scheduled = hour_committed[0].at + _HOUR_SECONDS
+            continue
+        break
     _send_schedule.append(_ScheduledSend(at=scheduled, is_busy=is_busy))
     return scheduled
 
@@ -235,9 +264,9 @@ async def _handle_calling_api(_bot: BaseBot, api: str, _data: dict[str, Any]) ->
 # ===== 事件阻断（rate_limit_gate）=====
 #
 # 【重要】RATE_LIMIT_GATE_PRIORITY 必须是项目中所有响应器优先级的最小值
-# （数值最小、最先运行）：每分钟限额用尽时，本响应器会停止事件传播，使事件
-# 不再被更低优先级（数值更大）的任何响应器处理，从而阻断所有会发送消息的
-# 插件。开发注意事项详见本模块开头的说明。
+# （数值最小、最先运行）：每分钟或每小时限额用尽时，本响应器会停止事件传播，
+# 使事件不再被更低优先级（数值更大）的任何响应器处理，从而阻断所有会发送
+# 消息的插件。开发注意事项详见本模块开头的说明。
 RATE_LIMIT_GATE_PRIORITY = -1000
 
 rate_limit_gate = on_message(priority=RATE_LIMIT_GATE_PRIORITY, block=False)
@@ -277,10 +306,12 @@ def _directed_to_bot(event: MessageEvent) -> bool:
 
 @rate_limit_gate.handle()
 async def handle_rate_limit_gate(matcher: Matcher, event: MessageEvent) -> None:
-    """每分钟限额用尽时阻断事件传播，并按会话节流回复忙碌提示。"""
+    """每分钟或每小时限额用尽时阻断事件传播，并按会话节流回复忙碌提示。"""
     now = time.monotonic()
     _purge_expired(now)
-    if sum(1 for entry in _send_schedule if not entry.is_busy) < _max_per_minute:
+    minute_exhausted = len(_committed_within(now, _MINUTE_SECONDS)) >= _max_per_minute
+    hour_exhausted = len(_committed_within(now, _HOUR_SECONDS)) >= _max_per_hour
+    if not minute_exhausted and not hour_exhausted:
         return
 
     # 限额已用尽：停止事件传播，后续优先级的插件都不会运行
