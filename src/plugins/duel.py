@@ -3,10 +3,11 @@
 在群聊中发起猜拳决斗：`/duel @成员 [点数]` 发起（点数默认 1，上限由
 DUEL_MAX_MULTIPLIER 配置，默认 100），被 @ 的成员可通过
 `/duel.accept @成员` 接受或 `/duel.reject @成员` 拒绝；接受后双方发送
-QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者积分 +点数、负者积分
--点数，平局积分不变；各群积分相互独立，积分数据使用 localstore 长期
-存储在本地；`/duel.rank` 可查看本群积分排行榜，`/duel.status` 可查看
-自己在本群的决斗状态。
+QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者分数 +点数、负者分数
+-点数，平局分数不变；各群分数相互独立，分数数据使用 localstore 长期
+存储在本地，并且作为"决斗分数服务"经跨插件服务注册中心（见
+_shared/services.py）供其它插件增减分数；`/duel.rank` 可查看本群分数
+排行榜，`/duel.status` 可查看自己在本群的决斗状态。
 
 @ 机器人自己时机器人按接受概率函数（DUEL_BOT_ACCEPT_FUNC，默认 1/点数）
 掷骰决定是否接受决斗，接受后发送猜拳表情；决斗状态保存在内存中，存在
@@ -40,14 +41,16 @@ from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_localstore import get_plugin_data_file
 from pydantic import BaseModel, field_validator
 
+from src.plugins._shared.services import DuelScoreService, register_service
+
 __plugin_meta__ = PluginMetadata(
     name="猜拳决斗",
-    description="在群聊中发起猜拳决斗，由机器人判定胜负并按群记录积分，支持积分排行榜",
+    description="在群聊中发起猜拳决斗，由机器人判定胜负并按群记录分数，支持分数排行榜",
     usage=(
         "/duel @成员 [点数]：向群成员发起决斗（点数默认为 1）\n"
         "/duel.accept @成员：接受对方的决斗邀请\n"
         "/duel.reject @成员：拒绝对方的决斗邀请\n"
-        "/duel.rank (high|h (<条数>)) (low|l (<条数>))：查看本群积分排行榜\n"
+        "/duel.rank (high|h (<条数>)) (low|l (<条数>))：查看本群分数排行榜\n"
         "/duel.status：查看自己在本群的决斗状态"
     ),
     type="application",
@@ -96,10 +99,10 @@ _TEXT_DEFAULTS = {
     "not_challenged": "{challenger} 未向你发起决斗。",
     "win": (
         "{winner} 在与 {loser} 的决斗（×{multiplier}）中获胜。"
-        "{winner} 的积分+{multiplier}，{loser} 的积分-{multiplier}。决斗结束。"
+        "{winner} 的分数+{multiplier}，{loser} 的分数-{multiplier}。决斗结束。"
     ),
     "draw": (
-        "{player_a} 与 {player_b} 的决斗（×{multiplier}）平局。双方积分不变。决斗结束。"
+        "{player_a} 与 {player_b} 的决斗（×{multiplier}）平局。双方分数不变。决斗结束。"
     ),
     "timeout": "{player_a} 与 {player_b} 的决斗（×{multiplier}）超时结束。",
 }
@@ -388,14 +391,14 @@ def _text(key: str, **kwargs: Any) -> str:
     return _texts[key].format(**kwargs)
 
 
-# 积分数据存储文件（localstore 插件数据目录）
+# 分数数据存储文件（localstore 插件数据目录）
 _SCORE_FILE = get_plugin_data_file("scores.json")
 
 
 def _normalize_score_record(
     user_id: Any, record: Any
 ) -> tuple[int, dict[str, Any]] | None:
-    """校验积分数据中的单条成员记录，无效时返回 None。"""
+    """校验分数数据中的单条成员记录，无效时返回 None。"""
     if not isinstance(user_id, str) or not user_id.isdigit():
         return None
     if not isinstance(record, dict):
@@ -407,7 +410,7 @@ def _normalize_score_record(
 
 
 def _is_legacy_group_data(group_data: Any) -> bool:
-    """判断群数据是否为旧版全局积分格式（值为成员记录而非群映射）。"""
+    """判断群数据是否为旧版全局分数格式（值为成员记录而非群映射）。"""
     return isinstance(group_data, dict) and (
         "score" in group_data or "name" in group_data
     )
@@ -416,7 +419,7 @@ def _is_legacy_group_data(group_data: Any) -> bool:
 def _normalize_group_record(
     group_id: Any, group_data: Any
 ) -> tuple[int, dict[int, dict[str, Any]]] | None:
-    """校验积分数据中的单个群记录，返回 (群号, 群内成员积分数据)。"""
+    """校验分数数据中的单个群记录，返回 (群号, 群内成员分数数据)。"""
     if not isinstance(group_id, str) or not group_id.isdigit():
         return None
     if not isinstance(group_data, dict):
@@ -435,22 +438,22 @@ def _normalize_group_record(
 
 
 def _load_scores() -> dict[int, dict[int, dict[str, Any]]]:
-    """从本地文件中读取积分数据，文件不存在或损坏时返回空数据。"""
+    """从本地文件中读取分数数据，文件不存在或损坏时返回空数据。"""
     if not _SCORE_FILE.exists():
         return {}
     try:
         raw = json.loads(_SCORE_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        logger.warning(f"读取决斗积分数据失败，本次将视为无积分数据：{exc}")
+        logger.warning(f"读取决斗分数数据失败，本次将视为无分数数据：{exc}")
         return {}
     if not isinstance(raw, dict):
-        logger.warning("决斗积分数据格式异常（应为 JSON 对象），本次将视为无积分数据")
+        logger.warning("决斗分数数据格式异常（应为 JSON 对象），本次将视为无分数数据")
         return {}
     if any(_is_legacy_group_data(group_data) for group_data in raw.values()):
         # 旧版全局格式的记录（键为成员 QQ 号，值含 score/name）：
         # 不含群号，按群隔离后无法归属，直接忽略
         logger.warning(
-            "决斗积分数据中存在旧版全局格式的记录（不含群号），按群隔离后无法归属，本次已忽略"
+            "决斗分数数据中存在旧版全局格式的记录（不含群号），按群隔离后无法归属，本次已忽略"
         )
     normalized = [
         item
@@ -464,30 +467,44 @@ def _load_scores() -> dict[int, dict[int, dict[str, Any]]]:
 
 
 def _save_scores() -> None:
-    """将积分数据写入本地文件，写入失败时仅记录错误。"""
+    """将分数数据写入本地文件，写入失败时仅记录错误。"""
     try:
         _SCORE_FILE.write_text(
             json.dumps(_scores, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError as exc:
-        logger.error(f"写取决斗积分数据失败，本次修改未保存：{exc}")
+        logger.error(f"写取决斗分数数据失败，本次修改未保存：{exc}")
 
 
-# 积分数据：群号 -> {成员 QQ 号 -> {"name": 最近使用的群昵称, "score": 积分}}
+# 分数数据：群号 -> {成员 QQ 号 -> {"name": 最近使用的群昵称, "score": 分数}}
 _scores = _load_scores()
 if _scores:
     _member_count = sum(len(members) for members in _scores.values())
-    logger.info(f"已加载决斗积分数据，共 {len(_scores)} 个群、{_member_count} 名成员")
+    logger.info(f"已加载决斗分数数据，共 {len(_scores)} 个群、{_member_count} 名成员")
 
 
 def _update_score(group_id: int, user_id: int, name: str, delta: int) -> None:
-    """更新指定群内成员的积分与昵称并写入本地文件。"""
+    """更新指定群内成员的分数与昵称并写入本地文件。"""
     group = _scores.setdefault(group_id, {})
     record = group.setdefault(user_id, {"name": name, "score": 0})
     record["name"] = name
     record["score"] = int(record["score"]) + delta
     _save_scores()
+
+
+class _DuelScoreService(DuelScoreService):
+    """决斗分数服务的实现：其它插件经服务注册中心调用它增减分数。"""
+
+    def add_score(self, group_id: int, user_id: int, name: str, delta: int) -> int:
+        """更新成员分数（名字按显示规范截断），返回更新后的分数。"""
+        _update_score(group_id, user_id, _truncate_name(name), delta)
+        return int(_scores[group_id][user_id]["score"])
+
+
+# 将分数能力注册为跨插件服务（契约见 _shared/services.py），
+# 供签到等插件发放奖励时调用
+register_service(DuelScoreService, _DuelScoreService())
 
 
 @dataclass(eq=False)
@@ -513,7 +530,7 @@ class _Duel:
     """接受决斗一方的群昵称（发起时记录，过长时已按上限截断）。"""
 
     multiplier: int
-    """决斗点数：胜者积分 +点数、败者积分 -点数。"""
+    """决斗点数：胜者分数 +点数、败者分数 -点数。"""
 
     created_at: float
     """决斗创建时间（time.monotonic，用于超时判断）。"""
@@ -888,7 +905,7 @@ def _decide_winner(duel: _Duel) -> tuple[int, str, int, str] | None:
 
 
 async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
-    """结算双方均已出手的决斗：更新积分并发送结果。
+    """结算双方均已出手的决斗：更新分数并发送结果。
 
     调用前该决斗必须已从决斗列表中认领移除，保证只结算一次。
     """
@@ -1154,10 +1171,10 @@ def _parse_rank_args(tokens: list[str]) -> tuple[bool, int, bool, int] | None:
 
 
 def _rank_entries(group_id: int, *, positive: bool) -> list[tuple[int, str, int]]:
-    """返回指定群的排行榜条目 (QQ 号, 昵称, 积分)，昵称过长时截断。
+    """返回指定群的排行榜条目 (QQ 号, 昵称, 分数)，昵称过长时截断。
 
-    高分榜为积分为正的成员按积分从高到低排列；低分榜为积分为负的成员
-    按积分绝对值从高到低排列；积分相同时按 QQ 号升序排列。
+    高分榜为分数为正的成员按分数从高到低排列；低分榜为分数为负的成员
+    按分数绝对值从高到低排列；分数相同时按 QQ 号升序排列。
     """
     entries = [
         (user_id, _truncate_name(str(record["name"])), score)
@@ -1192,7 +1209,7 @@ duel_rank_cmd = on_command("duel.rank", rule=is_type(GroupMessageEvent))
 async def handle_duel_rank(
     bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
 ) -> None:
-    """处理 /duel.rank 命令：查看本群积分排行榜。"""
+    """处理 /duel.rank 命令：查看本群分数排行榜。"""
     parsed = _parse_rank_args(args.extract_plain_text().lower().split())
     if parsed is None:
         await _send_text(bot, event.group_id, _USAGE_RANK, reply_to=event.message_id)
