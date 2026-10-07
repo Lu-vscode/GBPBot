@@ -4,7 +4,7 @@
 """
 
 import re
-from typing import Any, Optional
+from typing import Any
 
 from nonebot import logger, on_command
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment
@@ -61,7 +61,7 @@ _EMOJI_CLUSTER = re.compile(
 react = on_command("react")
 
 
-def _extract_emoji(message: Message) -> Optional[str]:
+def _extract_emoji(message: Message) -> str | None:
     """从命令参数中提取表情，提取不到时返回 None。
 
     QQ 原生表情段返回其数字 ID，Unicode 表情返回第一个表情簇。
@@ -94,7 +94,7 @@ def _to_emoji_id(emoji: str) -> str:
     return str(ord(emoji[0]))
 
 
-def _find_reply_id(message: Message) -> Optional[int]:
+def _find_reply_id(message: Message) -> int | None:
     """从消息段中提取引用消息的 ID，提取不到时返回 None。"""
     for segment in message:
         if segment.type != "reply":
@@ -105,7 +105,7 @@ def _find_reply_id(message: Message) -> Optional[int]:
     return None
 
 
-def _find_reply_id_in_raw(raw: Any) -> Optional[int]:
+def _find_reply_id_in_raw(raw: Any) -> int | None:
     """从 get_msg 返回的原始消息（段数组或 CQ 码字符串）中提取引用 ID。"""
     if isinstance(raw, str):
         return _find_reply_id(Message(raw))

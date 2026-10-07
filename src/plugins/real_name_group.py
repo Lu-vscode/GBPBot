@@ -11,7 +11,7 @@ import json
 import re
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from nonebot import get_plugin_config, logger, on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
@@ -204,7 +204,7 @@ def _add_exemption(group_id: int, user_id: int, reason: str, operator_id: int) -
     _exemptions.setdefault(group_id, {})[user_id] = {
         "reason": reason,
         "operator": str(operator_id),
-        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "time": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     _save_exemptions()
 

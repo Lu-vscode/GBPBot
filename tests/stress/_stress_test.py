@@ -31,6 +31,7 @@ import os
 import shutil
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -416,9 +417,9 @@ async def dispatch(payloads: list[dict[str, Any]], timeout: float = 240.0) -> li
         results = await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True), timeout
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(f"[stress] 事件分发超时（{timeout}s）")
-        return [asyncio.TimeoutError("dispatch timeout")]
+        return [TimeoutError("dispatch timeout")]
     return [r for r in results if isinstance(r, BaseException)]
 
 
@@ -457,7 +458,7 @@ async def wait_all_idle(timeout: float = 180.0) -> bool:
 def window_compliance(sends: list[dict[str, Any]]) -> dict[str, Any]:
     """检查发送间隔与滑动窗口合规性(窗口比较留 0.1s 抖动容差)。"""
     normal = [s for s in sends if s["text"] != BUSY_MESSAGE]
-    gaps = [b["t"] - a["t"] for a, b in zip(sends, sends[1:])]
+    gaps = [b["t"] - a["t"] for a, b in pairwise(sends)]
     min_gap = min(gaps) if gaps else None
     worst = 0
     worst_at = None

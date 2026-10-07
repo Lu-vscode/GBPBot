@@ -6,8 +6,17 @@ DUEL_MAX_MULTIPLIER 配置，默认 100），被 @ 的成员可通过
 QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者分数 +点数、负者分数
 -点数，平局分数不变；各群分数相互独立，分数数据使用 localstore 长期
 存储在本地，并且作为"决斗分数服务"经跨插件服务注册中心（见
-_shared/services.py）供其它插件增减分数；`/duel.rank` 可查看本群分数
-排行榜，`/duel.status` 可查看自己在本群的决斗状态。
+_shared/services.py）供其它插件增减分数与查询低分榜第一名；`/duel.rank` 可查看本群分数
+排行榜，`/duel.status` 可查看自己在本群的决斗状态。除分数服务外，
+还对外提供决斗状态服务（DuelStateService）、决斗事件服务
+（DuelEventService：在发起、接受、拒绝、出拳、结算、超时等环节发布
+事件，供道具等插件联动）、机器人接受概率函数服务
+（DuelBotAcceptService：供道具等插件校验并改写概率函数表达式）与
+决斗挑衅服务（DuelProvokeService：供道具等插件强制对方接受决斗，
+并由机器人代替对方发送猜拳表情）；
+机器人名单（BOT_LIST）由 _shared/config.py
+的共享配置提供，供各插件共享；群聊消息发送、群昵称获取与截断等通用
+逻辑复用 _shared/onebot.py 的共享工具。
 
 @ 机器人自己时机器人按接受概率函数（DUEL_BOT_ACCEPT_FUNC，默认 1/点数）
 掷骰决定是否接受决斗，接受后发送猜拳表情；决斗状态保存在内存中，存在
@@ -16,6 +25,7 @@ _shared/services.py）供其它插件增减分数；`/duel.rank` 可查看本群
 """
 
 import asyncio
+import inspect
 import json
 import math
 import random
@@ -41,7 +51,25 @@ from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_localstore import get_plugin_data_file
 from pydantic import BaseModel, field_validator
 
-from src.plugins._shared.services import DuelScoreService, register_service
+from src.plugins._shared.config import get_bot_list
+from src.plugins._shared.onebot import (
+    member_display_name,
+    send_group_text,
+    sender_display_name,
+    truncate_name,
+)
+from src.plugins._shared.services import (
+    DuelBotAcceptService,
+    DuelEvent,
+    DuelEventHandler,
+    DuelEventKind,
+    DuelEventService,
+    DuelProvokeService,
+    DuelScoreService,
+    DuelSnapshot,
+    DuelStateService,
+    register_service,
+)
 
 __plugin_meta__ = PluginMetadata(
     name="猜拳决斗",
@@ -130,6 +158,8 @@ _USAGE_RANK = (
 _USAGE_STATUS = "参数无法识别，用法：/duel.status"
 _STATUS_ALL_DENIED = "查看本群全部决斗状态仅超级用户可用。"
 _PAIR_ACTIVE = "你们之间已有一场进行中的决斗，请等待该决斗结束或超时后再发起。"
+_PROVOKED_ALREADY_STARTED = "你与 {challenger} 的决斗已经开始了，无需再接受。"
+_PROVOKED_CANNOT_REJECT = "你与 {challenger} 的决斗已经开始了，无法再拒绝。"
 _RANK_TITLE_HIGH = "决斗高分榜"
 _RANK_TITLE_LOW = "决斗低分榜"
 _RANK_EMPTY = "（暂无）"
@@ -139,12 +169,10 @@ class Config(BaseModel):
     """猜拳决斗插件配置。
 
     可在 `.env.{environment}` 文件中通过 `DUEL_*` 系列变量配置，
-    缺失或为空时使用默认行为（无机器人名单、超时 10 分钟、
-    群昵称最长 12 字符、点数上限 100、接受概率 1/点数、内置文案）。
+    缺失或为空时使用默认行为（超时 10 分钟、群昵称最长 12 字符、
+    点数上限 100、接受概率 1/点数、内置文案）；机器人名单见
+    BOT_LIST 共享配置（_shared/config.py）。
     """
-
-    duel_bot_list: Any = None
-    """不参与决斗的机器人名单：其它机器人 QQ 号列表（所有群通用），默认为空。"""
 
     duel_duration: float | None = None
     """决斗的存在时间上限（分钟），超过后自动超时结束，默认 10。"""
@@ -186,7 +214,6 @@ class Config(BaseModel):
     """决斗超时结束时的提示文案，占位符 {player_a}、{player_b}。"""
 
     @field_validator(
-        "duel_bot_list",
         "duel_duration",
         "duel_nickname_max_length",
         "duel_max_multiplier",
@@ -261,6 +288,40 @@ def _default_bot_accept_probability(multiplier: int) -> float:
     return 1 / multiplier
 
 
+# 表达式求值阶段的异常捕获集合（编译阶段另行捕获 SyntaxError/ValueError）
+_ACCEPT_EXPR_ERRORS = (
+    ArithmeticError,
+    AttributeError,
+    NameError,
+    TypeError,
+    ValueError,
+)
+
+
+def _accept_expr_error(expr: str) -> str | None:
+    """校验接受概率表达式在全部可选点数上都能求值为 0~1 的浮点数。
+
+    表达式为 Python 表达式（变量 x 为决斗点数，在受限命名空间中求值），
+    在点数取值范围 1..上限 内逐点检查；返回面向用户的错误文案，合法时
+    返回 None。
+    """
+    try:
+        code = compile(expr, "<DUEL_BOT_ACCEPT_FUNC>", "eval")
+    except SyntaxError as exc:
+        location = f"（第 {exc.offset} 个字符附近）" if exc.offset else ""
+        return f"表达式无法解析：{exc.msg}{location}"
+    except ValueError as exc:
+        return f"表达式无法解析：{exc}"
+    for x in range(1, _max_multiplier + 1):
+        try:
+            probability = float(eval(code, {"__builtins__": {}}, {"x": x}))
+        except _ACCEPT_EXPR_ERRORS as exc:
+            return f"表达式在点数 {x} 时求值失败：{exc}"
+        if not 0.0 <= probability <= 1.0:
+            return f"表达式在点数 {x} 时的值为 {probability}，不是 0~1 之间的概率"
+    return None
+
+
 def _bot_accept_func_or_default(expr: str | None) -> Callable[[int], float]:
     """解析机器人接受决斗的概率函数，无效时报错并使用默认函数。
 
@@ -271,39 +332,18 @@ def _bot_accept_func_or_default(expr: str | None) -> Callable[[int], float]:
     text = (expr or "").strip()
     if not text:
         return _default_bot_accept_probability
-    try:
-        code = compile(text, "<DUEL_BOT_ACCEPT_FUNC>", "eval")
-    except (SyntaxError, ValueError) as exc:
+    error = _accept_expr_error(text)
+    if error is not None:
         logger.error(
-            f"猜拳决斗配置 DUEL_BOT_ACCEPT_FUNC={text!r} 无法解析（{exc}），"
-            "已使用默认函数 1/点数"
+            f"猜拳决斗配置 DUEL_BOT_ACCEPT_FUNC={text!r} 校验未通过"
+            f"（{error}），已使用默认函数 1/点数"
         )
         return _default_bot_accept_probability
+    code = compile(text, "<DUEL_BOT_ACCEPT_FUNC>", "eval")
 
     def accept_probability(multiplier: int) -> float:
         return float(eval(code, {"__builtins__": {}}, {"x": multiplier}))
 
-    for x in range(1, _max_multiplier + 1):
-        try:
-            probability = accept_probability(x)
-        except (
-            ArithmeticError,
-            AttributeError,
-            NameError,
-            TypeError,
-            ValueError,
-        ) as exc:
-            logger.error(
-                f"猜拳决斗配置 DUEL_BOT_ACCEPT_FUNC={text!r} 在点数 {x} 时"
-                f"求值失败（{exc}），已使用默认函数 1/点数"
-            )
-            return _default_bot_accept_probability
-        if not 0.0 <= probability <= 1.0:
-            logger.error(
-                f"猜拳决斗配置 DUEL_BOT_ACCEPT_FUNC={text!r} 在点数 {x} 时概率为"
-                f" {probability}（需在 0~1 之间），已使用默认函数 1/点数"
-            )
-            return _default_bot_accept_probability
     logger.info(f"机器人接受决斗的概率函数已配置：{text}")
     return accept_probability
 
@@ -320,46 +360,9 @@ _USAGE_DUEL = (
 )
 
 
-def _as_qq(value: Any) -> int | None:
-    """把配置项转换为 QQ 号，无效时返回 None。"""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
-    return None
-
-
-def _normalize_bot_list(value: Any) -> frozenset[int]:
-    """校验并返回决斗机器人名单（所有群通用的机器人 QQ 号集合）。
-
-    配置应为机器人 QQ 号列表（JSON 数组）；兼容旧版按群配置格式的
-    JSON 对象（键为群号、值为机器人 QQ 号列表），此时各群名单会合并。
-    """
-    if value is None:
-        return frozenset()
-    if isinstance(value, dict):
-        # 旧版按群配置格式：各群名单合并为全局名单
-        members = [
-            qq for bots in value.values() if isinstance(bots, list) for qq in bots
-        ]
-        if members:
-            logger.warning(
-                "猜拳决斗配置 DUEL_BOT_LIST 使用了旧版按群配置格式，"
-                "已将各群的机器人合并为全局名单，建议改为机器人 QQ 号列表"
-            )
-        value = members
-    if not isinstance(value, list):
-        logger.warning(
-            "猜拳决斗配置 DUEL_BOT_LIST 格式无效（应为机器人 QQ 号列表），已视为空名单"
-        )
-        return frozenset()
-    return frozenset(qq for item in value if (qq := _as_qq(item)) is not None)
-
-
-# 决斗机器人名单：不参与决斗（挑战时提示不能向 BOT 发起）的机器人 QQ 号，所有群通用
-_bot_list = _normalize_bot_list(plugin_config.duel_bot_list)
+# 机器人名单（共享配置 BOT_LIST，见 _shared/config.py）：
+# 不参与决斗（挑战时提示不能向 BOT 发起）的机器人 QQ 号，所有群通用
+_bot_list = get_bot_list()
 
 
 def _text_or_default(key: str, configured: str | None) -> str:
@@ -501,10 +504,20 @@ class _DuelScoreService(DuelScoreService):
         _update_score(group_id, user_id, _truncate_name(name), delta)
         return int(_scores[group_id][user_id]["score"])
 
+    def get_score(self, group_id: int, user_id: int) -> int:
+        """查询成员在本群的分数，无记录时返回 0。"""
+        record = _scores.get(group_id, {}).get(user_id)
+        if record is None:
+            return 0
+        return int(record["score"])
 
-# 将分数能力注册为跨插件服务（契约见 _shared/services.py），
-# 供签到等插件发放奖励时调用
-register_service(DuelScoreService, _DuelScoreService())
+    def lowest_member(self, group_id: int) -> int | None:
+        """返回本群决斗低分榜第一名成员 QQ 号，没有负分成员时返回 None。
+
+        判定与 /duel.rank 的低分榜一致（复用同一排列）。
+        """
+        entries = _rank_entries(group_id, positive=False)
+        return entries[0][0] if entries else None
 
 
 @dataclass(eq=False)
@@ -538,12 +551,153 @@ class _Duel:
     accepted: bool = False
     """对方是否已接受（等待接受时为 False，机器人已掷骰接受时为 True）。"""
 
+    provoked_by_bot: bool = False
+    """是否被挑衅：该决斗中对方的手势由机器人代替（对方发送的猜拳表情无效）。"""
+
     gestures: dict[int, int] = field(default_factory=dict)
     """已发送的猜拳手势：成员 QQ 号 -> 手势结果（1 剪刀、2 石头、3 布）。"""
 
 
 # 进行中的决斗，按创建顺序排列（同一成员多场决斗时优先满足旧的）
 _duels: list[_Duel] = []
+
+
+def _duel_snapshot(duel: _Duel) -> DuelSnapshot:
+    """构造一场决斗的只读快照。"""
+    now = time.monotonic()
+    return DuelSnapshot(
+        group_id=duel.group_id,
+        challenger_id=duel.challenger_id,
+        challenger_name=duel.challenger_name,
+        opponent_id=duel.opponent_id,
+        opponent_name=duel.opponent_name,
+        multiplier=duel.multiplier,
+        accepted=duel.accepted,
+        gesture_users=frozenset(duel.gestures),
+        remaining_seconds=max(0.0, duel.created_at + _duration_seconds - now),
+    )
+
+
+class _DuelStateService(DuelStateService):
+    """决斗状态查询服务的实现：其它插件经服务注册中心查看进行中决斗。"""
+
+    def list_duels(self, group_id: int) -> list[DuelSnapshot]:
+        """返回指定群内全部进行中决斗的只读快照（按创建顺序）。"""
+        return [_duel_snapshot(duel) for duel in _duels if duel.group_id == group_id]
+
+
+# 决斗事件处理器与捕获集合：订阅方经 DuelEventService 增删处理器，
+# 发布时按注册顺序逐个调用；单个处理器抛出的异常只记录错误日志，
+# 不影响决斗流程与其它的处理器
+_EVENT_HANDLER_ERRORS = (Exception,)
+_event_handlers: list[DuelEventHandler] = []
+
+
+class _DuelEventService(DuelEventService):
+    """决斗事件服务的实现：订阅/注销决斗生命周期事件处理器。"""
+
+    def subscribe(self, handler: DuelEventHandler) -> None:
+        """注册事件处理器（同一处理器重复注册会被忽略）。"""
+        if handler not in _event_handlers:
+            _event_handlers.append(handler)
+
+    def unsubscribe(self, handler: DuelEventHandler) -> None:
+        """注销事件处理器（未注册时不做任何事）。"""
+        if handler in _event_handlers:
+            _event_handlers.remove(handler)
+
+
+class _DuelBotAcceptService(DuelBotAcceptService):
+    """机器人接受概率函数服务的实现：供道具等插件校验表达式。"""
+
+    def validate_accept_func(self, expr: str) -> str | None:
+        """校验概率函数表达式；额外禁止连续下划线（防外部输入逃逸）。"""
+        text = expr.strip()
+        if not text:
+            return "表达式不能为空。"
+        if "__" in text:
+            return "表达式不允许包含连续的下划线“__”。"
+        return _accept_expr_error(text)
+
+
+class _DuelProvokeService(DuelProvokeService):
+    """决斗挑衅服务的实现：供道具等插件强制对方接受决斗。"""
+
+    async def accept_by_provoke(
+        self, group_id: int, challenger_id: int, opponent_id: int
+    ) -> DuelSnapshot | None:
+        """强制对方接受决斗并标记对方手势由机器人代替，返回决斗快照。"""
+        duel = _find_pending_duel(group_id, challenger_id, opponent_id)
+        if duel is None:
+            return None
+        # 同步段完成状态标记：此后对方发送的猜拳表情被忽略、手势由机器人代替
+        duel.accepted = True
+        duel.provoked_by_bot = True
+        logger.info(
+            f"群 {group_id} 成员 {challenger_id} 挑衅 {opponent_id}，"
+            f"决斗已强制接受（点数 {duel.multiplier}），对方手势将由机器人代替"
+        )
+        await _fire_duel_event(
+            _make_duel_event(duel, DuelEventKind.ACCEPTED, actor_id=duel.opponent_id)
+        )
+        return _duel_snapshot(duel)
+
+    async def send_provoked_gesture(
+        self, bot: Bot, group_id: int, challenger_id: int, opponent_id: int
+    ) -> None:
+        """由机器人代替被挑衅决斗的对方发送猜拳表情并记录为对方手势。"""
+        duel = _find_provoked_duel(group_id, challenger_id, opponent_id)
+        if duel is None:
+            logger.warning(
+                f"群 {group_id} 待机器人代替出手的被挑衅决斗（{challenger_id} 与 "
+                f"{opponent_id}）已不在进行中，未发送猜拳表情"
+            )
+            return
+        await _send_bot_rps(bot, duel)
+
+
+def _make_duel_event(duel: _Duel, kind: DuelEventKind, **extra: Any) -> DuelEvent:
+    """以决斗的参与者信息构造事件，extra 中给出的字段会覆盖默认值。"""
+    fields: dict[str, Any] = {
+        "kind": kind,
+        "group_id": duel.group_id,
+        "bot_self_id": duel.bot_self_id,
+        "challenger_id": duel.challenger_id,
+        "challenger_name": duel.challenger_name,
+        "opponent_id": duel.opponent_id,
+        "opponent_name": duel.opponent_name,
+        "multiplier": duel.multiplier,
+    }
+    fields.update(extra)
+    return DuelEvent(**fields)
+
+
+async def _call_event_handler(handler: DuelEventHandler, event: DuelEvent) -> None:
+    """调用单个事件处理器；失败只记录错误日志，不影响决斗流程与其它处理器。"""
+    try:
+        result = handler(event)
+        if inspect.isawaitable(result):
+            await result
+    except _EVENT_HANDLER_ERRORS as exc:
+        logger.error(f"决斗事件处理器处理 {event.kind.value} 事件时出错：{exc}")
+
+
+async def _fire_duel_event(event: DuelEvent) -> None:
+    """把事件按注册顺序派发给全部处理器（单个处理器失败只记录日志）。
+
+    派发使用注册列表的快照，处理器在派发期间的注册或注销不影响本次派发。
+    """
+    for handler in tuple(_event_handlers):
+        await _call_event_handler(handler, event)
+
+
+# 将决斗能力注册为跨插件服务（契约见 _shared/services.py），
+# 供签到、道具等插件使用
+register_service(DuelScoreService, _DuelScoreService())
+register_service(DuelStateService, _DuelStateService())
+register_service(DuelEventService, _DuelEventService())
+register_service(DuelBotAcceptService, _DuelBotAcceptService())
+register_service(DuelProvokeService, _DuelProvokeService())
 
 
 @dataclass
@@ -628,40 +782,18 @@ def _is_rps_message(event: Event) -> bool:
 
 
 def _truncate_name(name: str) -> str:
-    """截断过长的群昵称：被截断的部分以"…"代替，总长不超过配置上限。"""
-    if len(name) <= _nickname_max_length:
-        return name
-    return name[: _nickname_max_length - 1] + "…"
+    """按配置上限截断群昵称（共享工具对接层）。"""
+    return truncate_name(name, _nickname_max_length)
 
 
 def _sender_display_name(event: GroupMessageEvent) -> str:
-    """返回发送者在群内的显示名（群昵称优先，否则 QQ 昵称），过长时截断。"""
-    card = (event.sender.card or "").strip()
-    nickname = (event.sender.nickname or "").strip()
-    name = card or nickname
-    if not name:
-        return f"QQ {event.user_id}"
-    return _truncate_name(name)
+    """返回发送者在群内的显示名（群昵称优先，过长时截断）。"""
+    return sender_display_name(event, _nickname_max_length)
 
 
 async def _member_display_name(bot: Bot, group_id: int, user_id: int) -> str:
-    """获取群成员的显示名（群昵称优先，过长时截断），查询失败时回退为 QQ 号。"""
-    try:
-        member = await bot.call_api(
-            "get_group_member_info",
-            group_id=group_id,
-            user_id=user_id,
-            no_cache=True,
-        )
-    except (ActionFailed, NetworkError) as exc:
-        logger.warning(f"获取群 {group_id} 成员 {user_id} 的资料失败：{exc}")
-        return f"QQ {user_id}"
-    card = str((member or {}).get("card") or "").strip()
-    nickname = str((member or {}).get("nickname") or "").strip()
-    name = card or nickname
-    if not name:
-        return f"QQ {user_id}"
-    return _truncate_name(name)
+    """获取群成员的显示名（群昵称优先，过长时截断）。"""
+    return await member_display_name(bot, group_id, user_id, _nickname_max_length)
 
 
 def _parse_multiplier(args: Message) -> int | None:
@@ -770,19 +902,10 @@ async def _send_deferred_timeouts(messages: list[_DeferredTimeoutMessage]) -> No
 async def _send_text(
     bot: Bot, group_id: int, text: str, reply_to: int | None = None
 ) -> None:
-    """向群聊发送文本消息，作为纯文本段构造以避免昵称等被解析为 CQ 码。"""
-    segments: list[MessageSegment] = []
-    if reply_to is not None:
-        segments.append(MessageSegment.reply(reply_to))
-    segments.append(MessageSegment.text(text))
-    try:
-        await bot.call_api(
-            "send_group_msg", group_id=group_id, message=Message(segments)
-        )
-    except (ActionFailed, NetworkError) as exc:
-        logger.warning(f"发送决斗消息失败（群 {group_id}）：{exc}")
-        return
-    _release_deferred_timeouts(group_id)
+    """向群聊发送决斗文本消息，成功后调度跟发本群保留中的超时提示。"""
+    success = await send_group_text(bot, group_id, text, reply_to, label="决斗消息")
+    if success:
+        _release_deferred_timeouts(group_id)
 
 
 async def _send_rps(bot: Bot, group_id: int) -> int | None:
@@ -834,6 +957,19 @@ def _find_pending_duel(group_id: int, challenger: int, opponent: int) -> _Duel |
     return None
 
 
+def _find_provoked_duel(group_id: int, challenger: int, opponent: int) -> _Duel | None:
+    """查找指定成员被挑衅（强制接受）的进行中决斗。"""
+    for duel in _duels:
+        if (
+            duel.group_id == group_id
+            and duel.provoked_by_bot
+            and duel.challenger_id == challenger
+            and duel.opponent_id == opponent
+        ):
+            return duel
+    return None
+
+
 def _take_gesture(group_id: int, user_id: int, gesture: int) -> _Duel | None:
     """把手势记录到等待该成员出手的最旧一场决斗，返回该决斗。
 
@@ -846,6 +982,9 @@ def _take_gesture(group_id: int, user_id: int, gesture: int) -> _Duel | None:
             and user_id in (duel.challenger_id, duel.opponent_id)
             and user_id not in duel.gestures
         ):
+            if duel.provoked_by_bot and user_id == duel.opponent_id:
+                # 被挑衅决斗中对方的手势由机器人代替，对方发送的猜拳表情无效
+                continue
             duel.gestures[user_id] = gesture
             return duel
     return None
@@ -904,13 +1043,60 @@ def _decide_winner(duel: _Duel) -> tuple[int, str, int, str] | None:
     )
 
 
+def _final_result(
+    duel: _Duel, result: tuple[int, str, int, str] | None, event: DuelEvent
+) -> tuple[int, str, int, str] | None:
+    """结合 settling 事件的改写确定最终胜负，非法改写回退原判定。
+
+    返回 (胜者 QQ 号, 胜者群昵称, 负者 QQ 号, 负者群昵称)；平局返回 None。
+    """
+    winner_id = event.winner_id
+    loser_id = event.loser_id
+    if winner_id is None and loser_id is None:
+        return None
+    participants = {
+        duel.challenger_id: duel.challenger_name,
+        duel.opponent_id: duel.opponent_name,
+    }
+    if (
+        winner_id is None
+        or loser_id is None
+        or winner_id == loser_id
+        or winner_id not in participants
+        or loser_id not in participants
+    ):
+        logger.warning(
+            f"settling 事件改写的胜负（{winner_id} 胜 {loser_id}）不是本场决斗"
+            f"的合法参与者组合，已回退为原判定"
+        )
+        return result
+    return winner_id, participants[winner_id], loser_id, participants[loser_id]
+
+
 async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
     """结算双方均已出手的决斗：更新分数并发送结果。
 
-    调用前该决斗必须已从决斗列表中认领移除，保证只结算一次。
+    调用前该决斗必须已从决斗列表中认领移除，保证只结算一次；
+    结算前发布 settling 事件（处理器可改写点数与胜负，点数负数按 0 处理、
+    非法改写回退原判定），结算与播报后发布 settled 事件。
     """
     result = _decide_winner(duel)
-    if result is None:
+    event = _make_duel_event(
+        duel,
+        DuelEventKind.SETTLING,
+        winner_id=result[0] if result is not None else None,
+        loser_id=result[2] if result is not None else None,
+    )
+    await _fire_duel_event(event)
+    multiplier = event.multiplier
+    if multiplier < 0:
+        logger.warning(
+            f"settling 事件把群 {duel.group_id} 决斗（原点数 {duel.multiplier}）"
+            f"的点数改为负数 {multiplier}，已按 0 结算"
+        )
+        multiplier = 0
+    final = _final_result(duel, result, event)
+    if final is None:
         logger.info(
             f"群 {duel.group_id} 中 {duel.challenger_id} 与 "
             f"{duel.opponent_id} 的决斗平局结束"
@@ -922,34 +1108,49 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
                 "draw",
                 player_a=duel.challenger_name,
                 player_b=duel.opponent_name,
-                multiplier=duel.multiplier,
+                multiplier=multiplier,
             ),
         )
-        return
-    winner_id, winner_name, loser_id, loser_name = result
-    _update_score(duel.group_id, winner_id, winner_name, duel.multiplier)
-    _update_score(duel.group_id, loser_id, loser_name, -duel.multiplier)
-    logger.info(
-        f"群 {duel.group_id} 的决斗中 {winner_id}（{winner_name}）获胜，"
-        f"{loser_id}（{loser_name}）落败"
-    )
-    await _send_text(
-        bot,
-        duel.group_id,
-        _text(
-            "win",
-            winner=winner_name,
-            loser=loser_name,
-            multiplier=duel.multiplier,
-        ),
+    else:
+        winner_id, winner_name, loser_id, loser_name = final
+        _update_score(duel.group_id, winner_id, winner_name, multiplier)
+        _update_score(duel.group_id, loser_id, loser_name, -multiplier)
+        logger.info(
+            f"群 {duel.group_id} 的决斗中 {winner_id}（{winner_name}）获胜，"
+            f"{loser_id}（{loser_name}）落败"
+        )
+        await _send_text(
+            bot,
+            duel.group_id,
+            _text(
+                "win",
+                winner=winner_name,
+                loser=loser_name,
+                multiplier=multiplier,
+            ),
+        )
+    await _fire_duel_event(
+        _make_duel_event(
+            duel,
+            DuelEventKind.SETTLED,
+            multiplier=multiplier,
+            winner_id=final[0] if final is not None else None,
+            loser_id=final[2] if final is not None else None,
+            winner_name=final[1] if final is not None else None,
+            loser_name=final[3] if final is not None else None,
+            draw=final is None,
+        )
     )
 
 
 async def _send_bot_rps(bot: Bot, duel: _Duel) -> None:
-    """机器人接受决斗后发送猜拳表情，并记录机器人自己的手势。
+    """机器人发送猜拳表情并记录为对方（接受方）的手势，随后检查结算。
 
-    发送猜拳表情无法指定结果、发送接口也不返回结果，需在发送后通过
-    get_msg 查询该消息读取实际结果；查询失败时等待协议端上报该消息。
+    用于两种场景：机器人掷骰接受决斗后出手（@机器人的决斗），以及
+    被挑衅的决斗中代替对方出手。发送猜拳表情无法指定结果、发送接口
+    也不返回结果，需在发送后通过 get_msg 查询该消息读取实际结果；
+    查询失败时本次不记录手势（机器人自己参与的决斗仍可在协议端
+    上报该消息时补记手势）。
     """
     message_id = await _send_rps(bot, duel.group_id)
     if message_id is None:
@@ -957,17 +1158,33 @@ async def _send_bot_rps(bot: Bot, duel: _Duel) -> None:
     gesture = await _fetch_rps_result(bot, message_id)
     if gesture is None:
         logger.warning(
-            f"未能获取机器人猜拳表情（消息 {message_id}）的结果，等待协议端上报该消息"
+            f"未能获取机器人猜拳表情（消息 {message_id}）的结果，本次未记录手势"
         )
         return
-    # 以下为同步段：记录手势、检查就绪并认领决斗
+    # 记录手势（同步段，避免并发事件重复记录），随后发布事件、
+    # 检查就绪并认领结算（认领有对象身份保护，不会重复结算）
     if not _record_gesture(duel, duel.opponent_id, gesture):
         return
+    await _fire_duel_event(
+        _make_duel_event(
+            duel, DuelEventKind.GESTURE, actor_id=duel.opponent_id, gesture=gesture
+        )
+    )
     if not _duel_ready(duel):
         return
     if not _remove_duel(duel):
         return
     await _resolve_duel(bot, duel)
+
+
+def _target_error(target: int, user_id: int) -> str | None:
+    """校验决斗的被 @ 对象是否合法（不能是自己或名单机器人），
+    返回错误文案或 None（合法）。"""
+    if target == user_id:
+        return _text("self")
+    if target in _bot_list:
+        return _text("bot")
+    return None
 
 
 duel_cmd = on_command("duel", rule=is_type(GroupMessageEvent))
@@ -983,21 +1200,45 @@ async def handle_duel(
     if target is None or multiplier is None:
         await _send_text(bot, event.group_id, _USAGE_DUEL, reply_to=event.message_id)
         return
-    if target == event.user_id:
-        await _send_text(bot, event.group_id, _text("self"), reply_to=event.message_id)
-        return
-    if target in _bot_list:
-        await _send_text(bot, event.group_id, _text("bot"), reply_to=event.message_id)
+    error = _target_error(target, event.user_id)
+    if error is not None:
+        await _send_text(bot, event.group_id, error, reply_to=event.message_id)
         return
 
     challenger_name = _sender_display_name(event)
     opponent_name = await _member_display_name(bot, event.group_id, target)
-    # 以下为同步段：复查并登记，避免并发指令（如快速重复发送）为
-    # 同一对成员创建出多场决斗
+    bot_id = int(bot.self_id)
+    # 同步段预检：双方之间已有进行中的决斗时直接提示（不发布发起事件）
     if _find_pair_duel(event.group_id, event.user_id, target) is not None:
         await _send_text(bot, event.group_id, _PAIR_ACTIVE, reply_to=event.message_id)
         return
-    bot_id = int(bot.self_id)
+
+    # challenge 事件：订阅方可以通过设置 block_reason 阻止本次发起
+    challenge_event = DuelEvent(
+        kind=DuelEventKind.CHALLENGE,
+        group_id=event.group_id,
+        bot_self_id=bot_id,
+        challenger_id=event.user_id,
+        challenger_name=challenger_name,
+        opponent_id=target,
+        opponent_name=opponent_name,
+        multiplier=multiplier,
+    )
+    await _fire_duel_event(challenge_event)
+    if challenge_event.block_reason:
+        await _send_text(
+            bot,
+            event.group_id,
+            challenge_event.block_reason,
+            reply_to=event.message_id,
+        )
+        return
+
+    # 以下为同步段：再次复查并登记，避免并发指令（如快速重复发送）或
+    # challenge 事件处理器的等待期间为同一对成员创建出多场决斗
+    if _find_pair_duel(event.group_id, event.user_id, target) is not None:
+        await _send_text(bot, event.group_id, _PAIR_ACTIVE, reply_to=event.message_id)
+        return
     duel = _Duel(
         group_id=event.group_id,
         bot_self_id=bot_id,
@@ -1028,6 +1269,11 @@ async def handle_duel(
                     multiplier=multiplier,
                 ),
             )
+            await _fire_duel_event(
+                _make_duel_event(
+                    duel, DuelEventKind.REJECTED, actor_id=duel.opponent_id
+                )
+            )
             return
         duel.accepted = True
     # 先保存决斗状态再发送文案：发送可能因频率限制排队，期间对方
@@ -1050,6 +1296,10 @@ async def handle_duel(
                 multiplier=multiplier,
             ),
         )
+        await _fire_duel_event(_make_duel_event(duel, DuelEventKind.CREATED))
+        await _fire_duel_event(
+            _make_duel_event(duel, DuelEventKind.ACCEPTED, actor_id=duel.opponent_id)
+        )
         await _send_bot_rps(bot, duel)
     else:
         await _send_text(
@@ -1062,6 +1312,7 @@ async def handle_duel(
                 multiplier=multiplier,
             ),
         )
+        await _fire_duel_event(_make_duel_event(duel, DuelEventKind.CREATED))
 
 
 duel_accept_cmd = on_command("duel.accept", rule=is_type(GroupMessageEvent))
@@ -1080,6 +1331,17 @@ async def handle_duel_accept(
     # 期间双方提前发送的猜拳表情也必须能按已接受的决斗记录
     duel = _find_pending_duel(event.group_id, challenger=target, opponent=event.user_id)
     if duel is None:
+        provoked = _find_provoked_duel(
+            event.group_id, challenger=target, opponent=event.user_id
+        )
+        if provoked is not None:
+            await _send_text(
+                bot,
+                event.group_id,
+                _PROVOKED_ALREADY_STARTED.format(challenger=provoked.challenger_name),
+                reply_to=event.message_id,
+            )
+            return
         target_name = await _member_display_name(bot, event.group_id, target)
         await _send_text(
             bot,
@@ -1101,6 +1363,9 @@ async def handle_duel_accept(
             multiplier=duel.multiplier,
         ),
     )
+    await _fire_duel_event(
+        _make_duel_event(duel, DuelEventKind.ACCEPTED, actor_id=event.user_id)
+    )
 
 
 duel_reject_cmd = on_command("duel.reject", rule=is_type(GroupMessageEvent))
@@ -1117,6 +1382,17 @@ async def handle_duel_reject(
         return
     duel = _find_pending_duel(event.group_id, challenger=target, opponent=event.user_id)
     if duel is None:
+        provoked = _find_provoked_duel(
+            event.group_id, challenger=target, opponent=event.user_id
+        )
+        if provoked is not None:
+            await _send_text(
+                bot,
+                event.group_id,
+                _PROVOKED_CANNOT_REJECT.format(challenger=provoked.challenger_name),
+                reply_to=event.message_id,
+            )
+            return
         target_name = await _member_display_name(bot, event.group_id, target)
         await _send_text(
             bot,
@@ -1137,6 +1413,9 @@ async def handle_duel_reject(
             challenger=duel.challenger_name,
             multiplier=duel.multiplier,
         ),
+    )
+    await _fire_duel_event(
+        _make_duel_event(duel, DuelEventKind.REJECTED, actor_id=event.user_id)
     )
 
 
@@ -1273,7 +1552,13 @@ def _status_lines(group_id: int, user_id: int) -> list[str]:
             if user_id == duel.challenger_id
             else duel.challenger_name
         )
-        if user_id not in duel.gestures:
+        if duel.provoked_by_bot and user_id == duel.opponent_id:
+            # 被挑衅的一方：手势由机器人代替，自己发送的猜拳表情无效
+            if user_id not in duel.gestures:
+                state = "你的猜拳表情将由 Bot 代替发送"
+            else:
+                state = "Bot 已代替你发送猜拳表情，等待对方发送猜拳表情"
+        elif user_id not in duel.gestures:
             state = "等待你发送猜拳表情"
         else:
             state = "你已出拳，等待对方发送猜拳表情"
@@ -1300,16 +1585,20 @@ def _all_status_lines(group_id: int) -> list[str]:
                 f"（×{duel.multiplier}）：等待对方接受，{suffix}。"
             )
             continue
-        players = (
-            (duel.challenger_id, duel.challenger_name),
-            (duel.opponent_id, duel.opponent_name),
-        )
-        pending_names = [name for uid, name in players if uid not in duel.gestures]
-        if len(pending_names) == 1:
-            state = f"等待 {pending_names[0]} 发送猜拳表情"
+        if duel.provoked_by_bot and duel.opponent_id not in duel.gestures:
+            # 被挑衅一方的手势由机器人代替（代替发送前仅短暂经过）
+            state = f"等待 Bot 代替 {duel.opponent_name} 发送猜拳表情"
         else:
-            # 双方都未出拳（双方均已出拳时会立即结算，不会留在列表中）
-            state = "等待双方发送猜拳表情"
+            players = (
+                (duel.challenger_id, duel.challenger_name),
+                (duel.opponent_id, duel.opponent_name),
+            )
+            pending_names = [name for uid, name in players if uid not in duel.gestures]
+            if len(pending_names) == 1:
+                state = f"等待 {pending_names[0]} 发送猜拳表情"
+            else:
+                # 双方都未出拳（双方均已出拳时会立即结算，不会留在列表中）
+                state = "等待双方发送猜拳表情"
         lines.append(
             f"{duel.challenger_name} 与 {duel.opponent_name} 的决斗"
             f"（×{duel.multiplier}）：{state}，{suffix}。"
@@ -1366,12 +1655,18 @@ async def handle_duel_gesture(bot: Bot, event: GroupMessageEvent) -> None:
     gesture = _extract_gesture(event.get_message())
     if gesture is None:
         return
-    # 同步段：记录手势、检查就绪并认领决斗，避免并发事件重复结算
+    # 同步段：记录手势（避免并发事件重复记录），随后发布事件、
+    # 检查就绪并认领结算（认领有对象身份保护，不会重复结算）
     duel = _take_gesture(event.group_id, event.user_id, gesture)
     if duel is None:
         return
     logger.debug(
         f"已记录成员 {event.user_id} 在群 {event.group_id} 决斗中的手势 {gesture}"
+    )
+    await _fire_duel_event(
+        _make_duel_event(
+            duel, DuelEventKind.GESTURE, actor_id=event.user_id, gesture=gesture
+        )
     )
     if not _duel_ready(duel):
         return
@@ -1389,8 +1684,9 @@ async def _check_duel_timeouts() -> None:
     """
     now = time.monotonic()
     bots = get_bots()
-    # 同步段：清理超过保留时间的旧提示，收集待通知的超时决斗并完成认领
-    # （遍历快照，认领会修改列表），超时提示转入延迟发送队列
+    # 清理超过保留时间的旧提示，遍历快照收集待通知的超时决斗并完成
+    # 认领（认领有对象身份保护，事件发布的等待期间不会重复认领），
+    # 超时提示转入延迟发送队列
     _drop_expired_deferred_timeouts(now)
     for duel in _duels[:]:
         if now - duel.created_at < _duration_seconds:
@@ -1417,6 +1713,7 @@ async def _check_duel_timeouts() -> None:
                 deadline=now + _TIMEOUT_MESSAGE_LINGER_SECONDS,
             )
         )
+        await _fire_duel_event(_make_duel_event(duel, DuelEventKind.TIMEOUT))
 
 
 logger.info(
@@ -1425,7 +1722,9 @@ logger.info(
     f"点数上限为 {_max_multiplier}"
 )
 if _bot_list:
-    logger.info(f"猜拳决斗机器人名单已配置（所有群通用）：{sorted(_bot_list)}")
+    logger.info(
+        f"机器人名单已配置（共享配置 BOT_LIST，所有群通用）：{sorted(_bot_list)}"
+    )
 
 scheduler.add_job(
     _check_duel_timeouts,
