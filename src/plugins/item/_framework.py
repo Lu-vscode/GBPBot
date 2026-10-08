@@ -118,6 +118,11 @@ class ItemDefinition:
     durability: str = "1/1"
     """耐久（展示文本，一般为"剩余耐久/总耐久"）。"""
 
+    detail_durability: Callable[[int, int], str] | None = None
+    """详情消息中耐久条目的动态显示（参数为查看者所在群号与其 QQ 号）；
+    默认 None 表示使用 durability 的静态文本；供道具模块按成员状态
+    动态展示（如显示耗损副本的剩余耐久）。"""
+
     note: str = ""
     """备注。"""
 
@@ -129,6 +134,16 @@ class ItemDefinition:
 
     handle_use: Callable[["ItemUseContext"], Awaitable[None]] | None = None
     """使用效果（成功提示消息由效果自身发送）。"""
+
+    handle_consume: Callable[["ItemUseContext"], bool] | None = None
+    """消耗道具的自定义方式（默认为消耗一件库存）；返回 False 表示未能
+    消耗，本次使用中止且不执行效果。耐久型等道具在此自行扣减耐久或移除
+    副本（须为同步函数，在校验与消耗的同步段内执行）。"""
+
+    transferable_count: Callable[[int, int], int] | None = None
+    """返回成员可用于交换与合成的该道具副本数量（参数为群号与成员 QQ 号；
+    默认 None 表示全部库存均可参与）。交换与合成在库存数量满足要求后按
+    该数量复核，如耐久耗损的副本可在此排除。"""
 
     handle_state_expire: _StateExpireHandler | None = None
     """状态到期回调（由定时清理调用；未提供时过期状态只被静默删除）。"""
@@ -210,6 +225,15 @@ def get_lowest_score_user(group_id: int) -> int | None:
     "位列决斗低分榜第一名"等使用条件。
     """
     return _score_service.lowest_member(group_id)
+
+
+def get_highest_score_user(group_id: int) -> int | None:
+    """查询指定群决斗高分榜第一名的成员 QQ 号（无正分成员时返回 None）。
+
+    高分榜的判定与决斗插件的 /duel.rank 高分榜一致；供道具模块校验
+    "位列决斗高分榜第一名"等使用条件。
+    """
+    return _score_service.highest_member(group_id)
 
 
 def add_user_score(group_id: int, user_id: int, user_name: str, delta: int) -> int:

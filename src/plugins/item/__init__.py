@@ -297,8 +297,15 @@ async def _send_text(
     await send_group_text(bot, group_id, text, reply_to, label="道具消息")
 
 
-def _detail_text(definition: ItemDefinition) -> str:
-    """生成道具的完整信息文本（用于详情与黑色诅咒获得消息）。"""
+def _detail_text(definition: ItemDefinition, group_id: int, user_id: int) -> str:
+    """生成道具的完整信息文本（用于详情与黑色诅咒获得消息）。
+
+    耐久条目默认使用定义中的静态文本；道具模块提供 detail_durability
+    钩子时改用其动态结果（按查看者状态计算）。
+    """
+    durability = definition.durability
+    if definition.detail_durability is not None:
+        durability = definition.detail_durability(group_id, user_id)
     lines = [
         f"编号：{definition.item_id}",
         f"名称：{definition.name}",
@@ -308,7 +315,7 @@ def _detail_text(definition: ItemDefinition) -> str:
         f"功能：{definition.effect}",
         f"使用条件：{definition.condition}",
         f"使用时机：{definition.timing}",
-        f"耐久：{definition.durability}",
+        f"耐久：{durability}",
     ]
     if definition.note:
         lines.append(f"备注：{definition.note}")
@@ -321,6 +328,18 @@ def _item_label(item_id: str) -> str:
     if definition is None:
         return item_id
     return definition.label
+
+
+def _transferable_count(group_id: int, user_id: int, item_id: str) -> int:
+    """返回成员可用于交换/合成的道具数量。
+
+    道具模块可经 transferable_count 钩子排除不可交易的副本（如耐久
+    耗损的副本）；未注册编号按库存数量处理。
+    """
+    definition = get_item(item_id)
+    if definition is not None and definition.transferable_count is not None:
+        return definition.transferable_count(group_id, user_id)
+    return get_item_count(group_id, user_id, item_id)
 
 
 def _parse_target(args: Message) -> int | None:
@@ -336,14 +355,27 @@ def _parse_target(args: Message) -> int | None:
 
 async def _run_item_use(context: ItemUseContext, *, consume: bool) -> None:
     """执行一次道具使用：使用条件校验（未通过时不消耗也不执行效果）、
-    可选地消耗一件库存、调用道具模块的使用效果。"""
+    可选地消耗道具（默认为消耗一件库存，道具模块可自定义消耗方式）、
+    调用道具模块的使用效果。"""
     if context.item.can_use is not None:
         error = context.item.can_use(context)
         if error:
             await context.send(error)
             return
     if consume:
-        remove_item(context.group_id, context.user_id, context.item.item_id)
+        consumed = (
+            context.item.handle_consume(context)
+            if context.item.handle_consume is not None
+            else remove_item(context.group_id, context.user_id, context.item.item_id)
+        )
+        if not consumed:
+            # 不可达：校验与消耗同处同步段，道具状态不会在期间改变
+            logger.error(
+                f"道具 {context.item.label} 消耗失败（群 {context.group_id}，"
+                f"成员 {context.user_id}）：库存或状态不一致"
+            )
+            await context.send("道具使用失败：道具状态异常，本次未消耗。")
+            return
     if context.item.handle_use is not None:
         await context.item.handle_use(context)
 
@@ -355,11 +387,16 @@ async def _auto_use_black_curse(
     user_name: str,
     definition: ItemDefinition,
 ) -> None:
-    """黑色诅咒获得的自动流程：先发送完整信息，再转交道具模块自动使用。"""
-    await _send_text(
+    """黑色诅咒获得的自动流程：先以合并转发发送完整信息，再转交道具模块自动使用。"""
+    await send_group_forward(
         bot,
         group_id,
-        f"你获得了黑色诅咒道具：{definition.label}！\n{_detail_text(definition)}",
+        [
+            f"你获得了黑色诅咒道具：{definition.label}！\n"
+            f"{_detail_text(definition, group_id, user_id)}"
+        ],
+        node_name="道具详情",
+        label="诅咒道具信息",
     )
     context = ItemUseContext(
         bot=bot,
@@ -577,7 +614,7 @@ async def handle_item_detail(
     await send_group_forward(
         bot,
         event.group_id,
-        [_detail_text(definition)],
+        [_detail_text(definition, event.group_id, event.user_id)],
         node_name="道具详情",
         label="道具详情",
     )
@@ -589,21 +626,32 @@ item_craft_cmd = on_command("item.craft", rule=is_type(GroupMessageEvent))
 def _craft_error(
     group_id: int, user_id: int, first: ItemDefinition, second: ItemDefinition
 ) -> str | None:
-    """校验两件合成材料（品质相同、非金色、数量足够），返回错误文案或 None。"""
+    """校验两件合成材料（品质相同、非金色、数量足够且可交易），
+    返回错误文案或 None。"""
     if first.quality != second.quality:
         return f"{first.label} 与 {second.label} 的品质不同，无法合成。"
     if first.quality is Quality.GOLD:
         return "金色传说道具无法合成。"
     needed = 2 if first.item_id == second.item_id else 1
+    if first.item_id == second.item_id:
+        need_text = f"{first.label}×2"
+    else:
+        need_text = f"{first.label}、{second.label} 各一件"
     if (
         get_item_count(group_id, user_id, first.item_id) < needed
         or get_item_count(group_id, user_id, second.item_id) < needed
     ):
-        if first.item_id == second.item_id:
-            need_text = f"{first.label}×2"
-        else:
-            need_text = f"{first.label}、{second.label} 各一件"
         return f"合成需要 {need_text}，你的数量不足。"
+    unavailable = next(
+        (
+            definition
+            for definition in (first, second)
+            if _transferable_count(group_id, user_id, definition.item_id) < needed
+        ),
+        None,
+    )
+    if unavailable is not None:
+        return f"合成需要 {need_text}，但 {unavailable.label} 目前无法用于合成。"
     return None
 
 
@@ -666,21 +714,26 @@ async def _start_exchange(
     bot: Bot,
     event: GroupMessageEvent,
     target: int,
-    item_id_a: str,
-    item_id_b: str,
+    first: ItemDefinition,
+    second: ItemDefinition,
 ) -> _PendingExchange | str:
     """复查并登记一笔交换，返回交换对象或错误文案（发送由调用方完成）。
 
-    先复查发起方道具，再获取对方显示名并复查对方道具与双方之间进行中
-    的交换；全部通过后在同步段登记，避免并发指令重复发起。
+    先复查发起方道具（拥有且可交易），再获取对方显示名并复查对方道具
+    （拥有且可交易）与双方之间进行中的交换；全部通过后在同步段登记，
+    避免并发指令重复发起。
     """
-    if get_item_count(event.group_id, event.user_id, item_id_a) < 1:
-        return f"你未拥有道具 {_item_label(item_id_a)}。"
+    if get_item_count(event.group_id, event.user_id, first.item_id) < 1:
+        return f"你未拥有道具 {first.label}。"
+    if _transferable_count(event.group_id, event.user_id, first.item_id) < 1:
+        return f"你的道具 {first.label} 目前无法用于交换。"
     target_name = await member_display_name(
         bot, event.group_id, target, _NICKNAME_MAX_LENGTH
     )
-    if get_item_count(event.group_id, target, item_id_b) < 1:
-        return f"{target_name} 未拥有道具 {_item_label(item_id_b)}。"
+    if get_item_count(event.group_id, target, second.item_id) < 1:
+        return f"{target_name} 未拥有道具 {second.label}。"
+    if _transferable_count(event.group_id, target, second.item_id) < 1:
+        return f"{target_name} 的道具 {second.label} 目前无法用于交换。"
     if _find_pair_exchange(event.group_id, event.user_id, target) is not None:
         return _EXCHANGE_PAIR_ACTIVE
     exchange = _PendingExchange(
@@ -689,8 +742,8 @@ async def _start_exchange(
         initiator_name=sender_display_name(event, _NICKNAME_MAX_LENGTH),
         target_id=target,
         target_name=target_name,
-        initiator_item_id=item_id_a,
-        target_item_id=item_id_b,
+        initiator_item_id=first.item_id,
+        target_item_id=second.item_id,
         created_at=time.monotonic(),
     )
     _exchanges.append(exchange)
@@ -740,7 +793,7 @@ async def handle_item_exchange(
         )
         return
     # 同步段：复查双方道具与进行中的交换并登记，避免并发指令重复发起
-    result = await _start_exchange(bot, event, target, item_id_a, item_id_b)
+    result = await _start_exchange(bot, event, target, definition_a, definition_b)
     if isinstance(result, str):
         await _send_text(bot, event.group_id, result, reply_to=event.message_id)
         return
@@ -803,12 +856,37 @@ async def handle_item_exchange_accept(
             f"{_item_label(exchange.initiator_item_id)}。",
         )
         return
+    if (
+        _transferable_count(
+            event.group_id, exchange.initiator_id, exchange.initiator_item_id
+        )
+        < 1
+    ):
+        # 发起方道具已不可交易（如耐久耗损）：交换取消并告知
+        _remove_exchange(exchange)
+        await _send_text(
+            bot,
+            event.group_id,
+            f"交换已取消：{exchange.initiator_name} 的道具 "
+            f"{_item_label(exchange.initiator_item_id)} 目前无法用于交换。",
+        )
+        return
     if get_item_count(event.group_id, event.user_id, exchange.target_item_id) < 1:
         # 接受方道具已失去：保留交换（可再次尝试接受或拒绝）
         await _send_text(
             bot,
             event.group_id,
             f"你已不再拥有道具 {_item_label(exchange.target_item_id)}，交换无法完成。",
+            reply_to=event.message_id,
+        )
+        return
+    if _transferable_count(event.group_id, event.user_id, exchange.target_item_id) < 1:
+        # 接受方道具已不可交易：保留交换（可再次尝试接受或拒绝）
+        await _send_text(
+            bot,
+            event.group_id,
+            f"你的道具 {_item_label(exchange.target_item_id)} 目前无法用于交换，"
+            "交换无法完成。",
             reply_to=event.message_id,
         )
         return

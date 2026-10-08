@@ -6,14 +6,17 @@ DUEL_MAX_MULTIPLIER 配置，默认 100），被 @ 的成员可通过
 QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者分数 +点数、负者分数
 -点数，平局分数不变；各群分数相互独立，分数数据使用 localstore 长期
 存储在本地，并且作为"决斗分数服务"经跨插件服务注册中心（见
-_shared/services.py）供其它插件增减分数与查询低分榜第一名；`/duel.rank` 可查看本群分数
-排行榜，`/duel.status` 可查看自己在本群的决斗状态。除分数服务外，
-还对外提供决斗状态服务（DuelStateService）、决斗事件服务
-（DuelEventService：在发起、接受、拒绝、出拳、结算、超时等环节发布
-事件，供道具等插件联动）、机器人接受概率函数服务
-（DuelBotAcceptService：供道具等插件校验并改写概率函数表达式）与
+_shared/services.py）供其它插件增减分数与查询高/低分榜第一名；
+`/duel.rank` 可查看本群分数排行榜，`/duel.status` 可查看自己在本
+群的决斗状态。除分数服务外，还对外提供决斗状态服务
+（DuelStateService）、决斗事件服务（DuelEventService：在发起、接受、
+拒绝、出拳、结算、超时、取消等环节发布事件，供道具等插件联动，
+settling 事件的处理器可接管结算），机器人接受概率函数服务
+（DuelBotAcceptService：供道具等插件校验并改写概率函数表达式）、
 决斗挑衅服务（DuelProvokeService：供道具等插件强制对方接受决斗，
-并由机器人代替对方发送猜拳表情）；
+并由机器人代替对方发送猜拳表情）与决斗点数缩放服务
+（DuelMultiplierService：供道具等插件缩放进行中决斗的点数，缩放
+到 0 时取消决斗并发布取消事件）；
 机器人名单（BOT_LIST）由 _shared/config.py
 的共享配置提供，供各插件共享；群聊消息发送、群昵称获取与截断等通用
 逻辑复用 _shared/onebot.py 的共享工具。
@@ -64,7 +67,9 @@ from src.plugins._shared.services import (
     DuelEventHandler,
     DuelEventKind,
     DuelEventService,
+    DuelMultiplierService,
     DuelProvokeService,
+    DuelScaleOutcome,
     DuelScoreService,
     DuelSnapshot,
     DuelStateService,
@@ -519,6 +524,14 @@ class _DuelScoreService(DuelScoreService):
         entries = _rank_entries(group_id, positive=False)
         return entries[0][0] if entries else None
 
+    def highest_member(self, group_id: int) -> int | None:
+        """返回本群决斗高分榜第一名成员 QQ 号，没有正分成员时返回 None。
+
+        判定与 /duel.rank 的高分榜一致（复用同一排列）。
+        """
+        entries = _rank_entries(group_id, positive=True)
+        return entries[0][0] if entries else None
+
 
 @dataclass(eq=False)
 class _Duel:
@@ -656,6 +669,47 @@ class _DuelProvokeService(DuelProvokeService):
         await _send_bot_rps(bot, duel)
 
 
+class _DuelMultiplierService(DuelMultiplierService):
+    """决斗点数缩放服务的实现：供道具等插件缩放进行中决斗的点数。"""
+
+    async def scale_multiplier(
+        self,
+        group_id: int,
+        user_a: int,
+        user_b: int,
+        numerator: int,
+        denominator: int,
+    ) -> DuelScaleOutcome | None:
+        """按比例缩放双方之间进行中决斗的点数；缩放到 0 时取消决斗。"""
+        if numerator < 1 or denominator < 1:
+            message = (
+                f"缩放比例的分子与分母必须为正整数，收到 {numerator}/{denominator}"
+            )
+            raise ValueError(message)
+        duel = _find_pair_duel(group_id, user_a, user_b)
+        if duel is None:
+            return None
+        old = duel.multiplier
+        new = old * numerator // denominator
+        if new <= 0:
+            # 同步段完成取消（从决斗列表移除），再发布取消事件
+            _remove_duel(duel)
+            logger.info(
+                f"群 {group_id} 中 {duel.challenger_id} 与 {duel.opponent_id} "
+                f"的决斗点数 {old} 被缩放为 0，决斗已取消"
+            )
+            await _fire_duel_event(
+                _make_duel_event(duel, DuelEventKind.CANCELED, multiplier=0)
+            )
+            return DuelScaleOutcome(multiplier=0, canceled=True)
+        duel.multiplier = new
+        logger.info(
+            f"群 {group_id} 中 {duel.challenger_id} 与 {duel.opponent_id} "
+            f"的决斗点数由 {old} 变为 {new}（比例 {numerator}/{denominator}）"
+        )
+        return DuelScaleOutcome(multiplier=new, canceled=False)
+
+
 def _make_duel_event(duel: _Duel, kind: DuelEventKind, **extra: Any) -> DuelEvent:
     """以决斗的参与者信息构造事件，extra 中给出的字段会覆盖默认值。"""
     fields: dict[str, Any] = {
@@ -698,6 +752,7 @@ register_service(DuelStateService, _DuelStateService())
 register_service(DuelEventService, _DuelEventService())
 register_service(DuelBotAcceptService, _DuelBotAcceptService())
 register_service(DuelProvokeService, _DuelProvokeService())
+register_service(DuelMultiplierService, _DuelMultiplierService())
 
 
 @dataclass
@@ -1078,7 +1133,8 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
 
     调用前该决斗必须已从决斗列表中认领移除，保证只结算一次；
     结算前发布 settling 事件（处理器可改写点数与胜负，点数负数按 0 处理、
-    非法改写回退原判定），结算与播报后发布 settled 事件。
+    非法改写回退原判定；处理器可设置 claimed 接管本次结算，此时跳过默认
+    的分数结算与结果播报，由处理器自行完成），结算与播报后发布 settled 事件。
     """
     result = _decide_winner(duel)
     event = _make_duel_event(
@@ -1088,6 +1144,12 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
         loser_id=result[2] if result is not None else None,
     )
     await _fire_duel_event(event)
+    if event.claimed:
+        logger.info(
+            f"群 {duel.group_id} 中 {duel.challenger_id} 与 {duel.opponent_id} "
+            "的决斗结算已被接管，跳过默认结算与播报"
+        )
+        return
     multiplier = event.multiplier
     if multiplier < 0:
         logger.warning(

@@ -65,6 +65,18 @@ class DuelScoreService(Protocol):
         """
         ...
 
+    def highest_member(self, group_id: int) -> int | None:
+        """返回指定群决斗高分榜第一名成员的 QQ 号，没有正分成员时返回 None。
+
+        高分榜的判定与 /duel.rank 的高分榜一致：分数为正的成员按
+        分数从高到低排列，分数相同时按 QQ 号升序排列；只有排在最前
+        的成员是第一名。
+
+        参数:
+            group_id: 群号。
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class DuelSnapshot:
@@ -134,6 +146,9 @@ class DuelEventKind(StrEnum):
     TIMEOUT = "timeout"
     """决斗超时认领移除后触发。"""
 
+    CANCELED = "canceled"
+    """决斗点数归零被取消后触发（决斗已从进行中移除，不会再结算）。"""
+
 
 @dataclass
 class DuelEvent:
@@ -171,6 +186,10 @@ class DuelEvent:
 
     block_reason: str | None = None
     """challenge 事件中由处理器设置的非空文案表示取消本次发起。"""
+
+    claimed: bool = False
+    """settling 事件中由处理器设为 True 表示接管本次结算：决斗跳过默认的
+    分数结算与结果播报（含 settled 事件），由处理器自行完成结算。"""
 
     winner_id: int | None = None
     """settling/settled 事件的胜者 QQ 号（与 loser_id 同为 None 表示平局）。"""
@@ -266,6 +285,50 @@ class DuelProvokeService(Protocol):
             group_id: 决斗所在群号。
             challenger_id: 发起决斗的一方（挑衅者）的成员 QQ 号。
             opponent_id: 被挑衅的成员 QQ 号。
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class DuelScaleOutcome:
+    """一次进行中决斗点数缩放的结果（由 DuelMultiplierService 返回）。"""
+
+    multiplier: int
+    """缩放后的决斗点数（决斗被取消时为 0）。"""
+
+    canceled: bool
+    """决斗是否因点数被缩放到 0 而取消。"""
+
+
+@runtime_checkable
+class DuelMultiplierService(Protocol):
+    """决斗点数缩放服务（由猜拳决斗插件提供）。"""
+
+    async def scale_multiplier(
+        self,
+        group_id: int,
+        user_a: int,
+        user_b: int,
+        numerator: int,
+        denominator: int,
+    ) -> DuelScaleOutcome | None:
+        """将双方之间进行中的决斗点数按比例缩放。
+
+        新点数为原点数乘 numerator 除以 denominator 后向下取整；新
+        点数为 0 时取消该决斗（从进行中移除并发布 canceled 事件）；
+        未找到符合条件的决斗时不做任何事并返回 None。决斗不限发起
+        方向与是否已被接受。
+
+        参数:
+            group_id: 决斗所在群号。
+            user_a: 决斗一方的成员 QQ 号。
+            user_b: 决斗另一方的成员 QQ 号。
+            numerator: 缩放比例的分子（正整数）。
+            denominator: 缩放比例的分母（正整数）。
+
+        返回:
+            缩放结果（缩放后的点数与决斗是否被取消）；双方之间没有
+            进行中的决斗时返回 None。
         """
         ...
 

@@ -1,9 +1,10 @@
-"""道具「复制」组（编号 100~105）：金色传说至灰色垃圾、可选型。
+"""道具「复制」组（编号 100~105，名称如「复制（金）」）：金色传说至
+灰色垃圾、可选型。
 
 使用 /item.use <复制道具编号> <需要复制的道具编号> 复制一件自己拥有的、
 品质不高于该复制道具品质的道具；由备注可知复制道具自身也允许（先消耗
-一件再复制一件，数量不变）。六件道具仅品质不同：编号越大品质越低、
-可复制的品质上限越低。
+一件再复制一件，数量不变）。六件道具的差异仅在品质与名称（颜色后缀）：
+编号越大品质越低、可复制的品质上限越低。
 """
 
 from src.plugins.item._framework import (
@@ -19,14 +20,14 @@ from src.plugins.item._framework import (
     register_item,
 )
 
-# 本组道具：编号 -> 品质（即该道具可复制的品质上限）
-_COPY_QUALITIES = (
-    ("100", Quality.GOLD),
-    ("101", Quality.PURPLE),
-    ("102", Quality.BLUE),
-    ("103", Quality.GREEN),
-    ("104", Quality.WHITE),
-    ("105", Quality.GRAY),
+# 本组道具：编号 -> 品质与名称（名称带品质颜色后缀；品质同时是可复制的上限）
+_COPY_ITEMS = (
+    ("100", Quality.GOLD, "复制（金）"),
+    ("101", Quality.PURPLE, "复制（紫）"),
+    ("102", Quality.BLUE, "复制（蓝）"),
+    ("103", Quality.GREEN, "复制（绿）"),
+    ("104", Quality.WHITE, "复制（白）"),
+    ("105", Quality.GRAY, "复制（灰）"),
 )
 
 
@@ -62,11 +63,11 @@ async def _handle_use(context: ItemUseContext) -> None:
 
 def _register_copy_items() -> None:
     """注册本组的六件「复制」道具。"""
-    for item_id, quality in _COPY_QUALITIES:
+    for item_id, quality, name in _COPY_ITEMS:
         register_item(
             ItemDefinition(
                 item_id=item_id,
-                name="复制",
+                name=name,
                 quality=quality,
                 types=(ItemType.OPTIONAL,),
                 description="复制道具。",
