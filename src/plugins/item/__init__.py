@@ -61,7 +61,7 @@ __plugin_meta__ = PluginMetadata(
     description="群聊道具系统：签到获得随机道具，可查看、合成、交换与使用",
     usage=(
         "/item.list：查看自己拥有的道具\n"
-        "/item.detail <道具编号>：查看自己拥有道具的详细信息\n"
+        "/item.detail <道具编号>（别名 /item.info）：查看自己拥有道具的详细信息\n"
         "/item.craft <道具编号1> <道具编号2>：用两件同品质道具合成一件随机道具\n"
         "/item.exchange @成员 <自己的道具编号> <对方的道具编号>：发起道具交换\n"
         "/item.exchange.accept @成员：接受对方的道具交换\n"
@@ -535,28 +535,34 @@ def _remove_exchange(exchange: _PendingExchange) -> bool:
     return False
 
 
-def _draw_craft_results(quality: Quality) -> list[ItemDefinition] | None:
-    """抽取合成结果（获得的道具列表）；目标品质的道具池为空时返回 None。
+def _draw_craft_results(quality: Quality) -> tuple[str, list[ItemDefinition]] | None:
+    """抽取合成结果（结果文案前缀与获得的道具列表）；目标品质的道具池
+    为空时返回 None。
 
-    紫色史诗"高两级"超出最高品质时改为获得两件金色传说。
+    结果前缀按抽取档位为"合成失败"（低一级）、"合成成功"（高一级）与
+    "合成大成功"（高两级）；紫色史诗"高两级"超出最高品质时改为获得
+    两件金色传说。
     """
     roll = random.random()
     if roll < _craft_down:
+        prefix = "合成失败"
         target = Quality(quality - 1)
     elif roll < _craft_down + _craft_up:
+        prefix = "合成成功"
         target = Quality(quality + 1)
     elif quality is Quality.PURPLE:
         first = draw_item_of_quality(Quality.GOLD)
         second = draw_item_of_quality(Quality.GOLD)
         if first is None or second is None:
             return None
-        return [first, second]
+        return "合成大成功", [first, second]
     else:
+        prefix = "合成大成功"
         target = Quality(quality + 2)
     item = draw_item_of_quality(target)
     if item is None:
         return None
-    return [item]
+    return prefix, [item]
 
 
 item_list_cmd = on_command("item.list", rule=is_type(GroupMessageEvent))
@@ -578,13 +584,15 @@ async def handle_item_list(
         return
     lines = ["你的道具："]
     lines.extend(
-        f"{definition.label}（{quality_label(definition.quality)}）×{count}"
+        f"{definition.label}【{quality_label(definition.quality)}】×{count}"
         for definition, count in entries
     )
     await _send_text(bot, event.group_id, "\n".join(lines))
 
 
-item_detail_cmd = on_command("item.detail", rule=is_type(GroupMessageEvent))
+item_detail_cmd = on_command(
+    "item.detail", rule=is_type(GroupMessageEvent), aliases={"item.info"}
+)
 
 
 @item_detail_cmd.handle()
@@ -681,8 +689,8 @@ async def handle_item_craft(
     if error is not None:
         await _send_text(bot, event.group_id, error, reply_to=event.message_id)
         return
-    results = _draw_craft_results(definition_a.quality)
-    if results is None:
+    drawn = _draw_craft_results(definition_a.quality)
+    if drawn is None:
         await _send_text(
             bot,
             event.group_id,
@@ -690,6 +698,7 @@ async def handle_item_craft(
             reply_to=event.message_id,
         )
         return
+    prefix, results = drawn
     remove_item(event.group_id, event.user_id, item_id_a)
     remove_item(event.group_id, event.user_id, item_id_b)
     for result in results:
@@ -699,8 +708,8 @@ async def handle_item_craft(
     await _send_text(
         bot,
         event.group_id,
-        f"合成完成：消耗了 {definition_a.label}、{definition_b.label}，"
-        f"获得道具 {result_labels}。",
+        f"{prefix}，消耗了 {definition_a.label}、{definition_b.label}，"
+        f"获得了 {result_labels}。",
     )
     user_name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
     for result in results:

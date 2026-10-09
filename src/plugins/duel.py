@@ -7,8 +7,9 @@ QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者分数 +�
 -点数，平局分数不变；各群分数相互独立，分数数据使用 localstore 长期
 存储在本地，并且作为"决斗分数服务"经跨插件服务注册中心（见
 _shared/services.py）供其它插件增减分数与查询高/低分榜第一名；
-`/duel.rank` 可查看本群分数排行榜，`/duel.status` 可查看自己在本
-群的决斗状态。除分数服务外，还对外提供决斗状态服务
+`/duel.rank` 可查看本群分数排行榜（以合并转发发送），`/duel.score`
+可查看自己在本群的决斗分数，`/duel.status` 可查看自己在本群的决斗
+状态。除分数服务外，还对外提供决斗状态服务
 （DuelStateService）、决斗事件服务（DuelEventService：在发起、接受、
 拒绝、出拳、结算、超时、取消等环节发布事件，供道具等插件联动，
 settling 事件的处理器可接管结算），机器人接受概率函数服务
@@ -57,6 +58,7 @@ from pydantic import BaseModel, field_validator
 from src.plugins._shared.config import get_bot_list
 from src.plugins._shared.onebot import (
     member_display_name,
+    send_group_forward,
     send_group_text,
     sender_display_name,
     truncate_name,
@@ -78,12 +80,14 @@ from src.plugins._shared.services import (
 
 __plugin_meta__ = PluginMetadata(
     name="猜拳决斗",
-    description="在群聊中发起猜拳决斗，由机器人判定胜负并按群记录分数，支持分数排行榜",
+    description="在群聊中发起猜拳决斗，由机器人判定胜负并按群记录分数，支持分数排行榜与分数查询",
     usage=(
         "/duel @成员 [点数]：向群成员发起决斗（点数默认为 1）\n"
         "/duel.accept @成员：接受对方的决斗邀请\n"
         "/duel.reject @成员：拒绝对方的决斗邀请\n"
-        "/duel.rank (high|h (<条数>)) (low|l (<条数>))：查看本群分数排行榜\n"
+        "/duel.rank (high|h (<条数>)) (low|l (<条数>))：查看本群分数排行榜"
+        "（合并转发发送）\n"
+        "/duel.score：查看自己在本群的决斗分数\n"
         "/duel.status：查看自己在本群的决斗状态"
     ),
     type="application",
@@ -160,6 +164,7 @@ _USAGE_RANK = (
     "参数无法识别，用法：/duel.rank (high|h (<条数>)) (low|l (<条数>))，"
     "条数需为正整数且默认为 10"
 )
+_USAGE_SCORE = "参数无法识别，用法：/duel.score"
 _USAGE_STATUS = "参数无法识别，用法：/duel.status"
 _STATUS_ALL_DENIED = "查看本群全部决斗状态仅超级用户可用。"
 _PAIR_ACTIVE = "你们之间已有一场进行中的决斗，请等待该决斗结束或超时后再发起。"
@@ -168,6 +173,8 @@ _PROVOKED_CANNOT_REJECT = "你与 {challenger} 的决斗已经开始了，无法
 _RANK_TITLE_HIGH = "决斗高分榜"
 _RANK_TITLE_LOW = "决斗低分榜"
 _RANK_EMPTY = "（暂无）"
+# 排行榜合并转发中节点显示的发送者名称
+_RANK_NODE_NAME = "决斗分数排行榜"
 
 
 class Config(BaseModel):
@@ -963,6 +970,23 @@ async def _send_text(
         _release_deferred_timeouts(group_id)
 
 
+async def _send_forward(
+    bot: Bot,
+    group_id: int,
+    texts: list[str],
+    *,
+    node_name: str,
+    label: str,
+) -> None:
+    """以合并转发的聊天记录形式发送多条文本（每条文本一个节点），
+    成功后调度跟发本群保留中的超时提示。"""
+    success = await send_group_forward(
+        bot, group_id, texts, node_name=node_name, label=label
+    )
+    if success:
+        _release_deferred_timeouts(group_id)
+
+
 async def _send_rps(bot: Bot, group_id: int) -> int | None:
     """发送猜拳表情，返回消息 ID，发送失败时返回 None。"""
     try:
@@ -1577,7 +1601,25 @@ async def handle_duel_rank(
                 low_limit,
             )
         )
-    await _send_text(bot, event.group_id, "\n\n".join(sections))
+    await _send_forward(
+        bot, event.group_id, sections, node_name=_RANK_NODE_NAME, label="决斗排行榜"
+    )
+
+
+duel_score_cmd = on_command("duel.score", rule=is_type(GroupMessageEvent))
+
+
+@duel_score_cmd.handle()
+async def handle_duel_score(
+    bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
+) -> None:
+    """处理 /duel.score 命令：查看自己在本群的决斗分数（无记录时为 0）。"""
+    if args.extract_plain_text().split():
+        await _send_text(bot, event.group_id, _USAGE_SCORE, reply_to=event.message_id)
+        return
+    record = _scores.get(event.group_id, {}).get(event.user_id)
+    score = int(record["score"]) if record is not None else 0
+    await _send_text(bot, event.group_id, f"你在本群的决斗分数为 {score} 分。")
 
 
 def _remaining_text(duel: _Duel, now: float) -> str:
