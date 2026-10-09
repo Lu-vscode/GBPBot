@@ -539,6 +539,15 @@ class _DuelScoreService(DuelScoreService):
         entries = _rank_entries(group_id, positive=True)
         return entries[0][0] if entries else None
 
+    def rank_entries(self, group_id: int) -> list[tuple[int, str, int]]:
+        """返回本群决斗分数总榜条目：高分榜（正分降序）与反转的低分榜
+        （负分降序）拼接，分数相同时按 QQ 号升序排列。
+        """
+        negative = _rank_entries(group_id, positive=False)
+        # 低分榜原为绝对值降序（分数升序），反转为分数降序后再拼接
+        negative.sort(key=lambda entry: (-entry[2], entry[0]))
+        return _rank_entries(group_id, positive=True) + negative
+
 
 @dataclass(eq=False)
 class _Duel:
@@ -1156,9 +1165,11 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
     """结算双方均已出手的决斗：更新分数并发送结果。
 
     调用前该决斗必须已从决斗列表中认领移除，保证只结算一次；
-    结算前发布 settling 事件（处理器可改写点数与胜负，点数负数按 0 处理、
-    非法改写回退原判定；处理器可设置 claimed 接管本次结算，此时跳过默认
-    的分数结算与结果播报，由处理器自行完成），结算与播报后发布 settled 事件。
+    结算前发布 settling 事件（处理器可改写点数与胜负、读取双方手势，并可
+    设置前缀文本在默认结算消息前拼接；点数负数按 0 处理、非法改写回退原
+    判定；处理器可设置 claimed 接管本次结算，此时跳过默认的分数结算与
+    结果播报、也不使用前缀，由处理器自行完成），结算与播报后发布 settled
+    事件（接管结算时在接管处理器完成结算后发布）。
     """
     result = _decide_winner(duel)
     event = _make_duel_event(
@@ -1166,12 +1177,27 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
         DuelEventKind.SETTLING,
         winner_id=result[0] if result is not None else None,
         loser_id=result[2] if result is not None else None,
+        challenger_gesture=duel.gestures[duel.challenger_id],
+        opponent_gesture=duel.gestures[duel.opponent_id],
     )
     await _fire_duel_event(event)
+    final = _final_result(duel, result, event)
     if event.claimed:
         logger.info(
             f"群 {duel.group_id} 中 {duel.challenger_id} 与 {duel.opponent_id} "
             "的决斗结算已被接管，跳过默认结算与播报"
+        )
+        await _fire_duel_event(
+            _make_duel_event(
+                duel,
+                DuelEventKind.SETTLED,
+                multiplier=event.multiplier,
+                winner_id=final[0] if final is not None else None,
+                loser_id=final[2] if final is not None else None,
+                winner_name=final[1] if final is not None else None,
+                loser_name=final[3] if final is not None else None,
+                draw=final is None,
+            )
         )
         return
     multiplier = event.multiplier
@@ -1181,7 +1207,9 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
             f"的点数改为负数 {multiplier}，已按 0 结算"
         )
         multiplier = 0
-    final = _final_result(duel, result, event)
+    # settling 事件处理器可设置在默认结算消息前拼接的前缀（如道具效果
+    # 说明）；结算被接管时已跳过默认播报，前缀自然不被使用
+    prefix = event.result_prefix or ""
     if final is None:
         logger.info(
             f"群 {duel.group_id} 中 {duel.challenger_id} 与 "
@@ -1190,7 +1218,8 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
         await _send_text(
             bot,
             duel.group_id,
-            _text(
+            prefix
+            + _text(
                 "draw",
                 player_a=duel.challenger_name,
                 player_b=duel.opponent_name,
@@ -1208,7 +1237,8 @@ async def _resolve_duel(bot: Bot, duel: _Duel) -> None:
         await _send_text(
             bot,
             duel.group_id,
-            _text(
+            prefix
+            + _text(
                 "win",
                 winner=winner_name,
                 loser=loser_name,

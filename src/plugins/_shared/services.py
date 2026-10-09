@@ -77,6 +77,18 @@ class DuelScoreService(Protocol):
         """
         ...
 
+    def rank_entries(self, group_id: int) -> list[tuple[int, str, int]]:
+        """返回指定群决斗分数总榜的全部条目 (QQ 号, 昵称, 分数)。
+
+        总榜为决斗高分榜与反转的决斗低分榜的拼接：全部非零分数的
+        成员按分数从高到低排列，分数相同时按 QQ 号升序排列；0 分或
+        没有分数记录的成员不在榜上。
+
+        参数:
+            group_id: 群号。
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class DuelSnapshot:
@@ -138,10 +150,13 @@ class DuelEventKind(StrEnum):
     """记录任一方猜拳手势后触发。"""
 
     SETTLING = "settling"
-    """判定完成、结算分数前触发；处理器可修改点数与胜负。"""
+    """判定完成、结算分数前触发；处理器可修改点数与胜负、读取双方手势
+    （challenger_gesture/opponent_gesture）、设置默认结算消息前缀
+    （result_prefix，结算被接管时不使用）。"""
 
     SETTLED = "settled"
-    """分数结算与结果播报完成后触发。"""
+    """分数结算与结果播报完成后触发；结算被处理器接管时在接管处理器
+    完成结算后触发。"""
 
     TIMEOUT = "timeout"
     """决斗超时认领移除后触发。"""
@@ -184,12 +199,25 @@ class DuelEvent:
     gesture: int | None = None
     """gesture 事件的手势值（1 剪刀、2 石头、3 布）。"""
 
+    challenger_gesture: int | None = None
+    """settling 事件的挑战者手势（1 剪刀、2 石头、3 布）；双方出拳后的
+    结算前触发，此时两人手势必然已记录。"""
+
+    opponent_gesture: int | None = None
+    """settling 事件的接受方手势（1 剪刀、2 石头、3 布）。"""
+
     block_reason: str | None = None
     """challenge 事件中由处理器设置的非空文案表示取消本次发起。"""
 
     claimed: bool = False
     """settling 事件中由处理器设为 True 表示接管本次结算：决斗跳过默认的
-    分数结算与结果播报（含 settled 事件），由处理器自行完成结算。"""
+    分数结算与结果播报，由处理器自行完成结算；settled 事件仍会在接管
+    处理器完成结算后发布。"""
+
+    result_prefix: str | None = None
+    """settling 事件中由处理器设置的前缀文本（如道具效果说明），默认结算
+    消息（胜负/平局播报）会将其拼接在消息最前；结算被接管（claimed）时
+    跳过了默认播报，前缀不被使用。"""
 
     winner_id: int | None = None
     """settling/settled 事件的胜者 QQ 号（与 loser_id 同为 None 表示平局）。"""

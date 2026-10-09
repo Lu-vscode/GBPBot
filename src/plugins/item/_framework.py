@@ -236,6 +236,16 @@ def get_highest_score_user(group_id: int) -> int | None:
     return _score_service.highest_member(group_id)
 
 
+def get_rank_entries(group_id: int) -> list[tuple[int, str, int]]:
+    """查询指定群决斗分数总榜的全部条目 (QQ 号, 昵称, 分数)。
+
+    总榜为决斗高分榜与反转的决斗低分榜的拼接：全部非零分数的成员
+    按分数从高到低排列、同分按 QQ 号升序排列；0 分或没有分数记录的
+    成员不在榜上；供道具模块按榜上相邻位置处理（如交换分数）。
+    """
+    return _score_service.rank_entries(group_id)
+
+
 def add_user_score(group_id: int, user_id: int, user_name: str, delta: int) -> int:
     """经决斗分数服务为成员增减决斗分数，返回更新后的分数。
 
@@ -456,6 +466,25 @@ def list_states(group_id: int, user_id: int) -> list[ItemState]:
         return []
     now = time.time()
     return [state for state in user_states if _state_active(state, now)]
+
+
+def list_state_holders(group_id: int, key: str) -> list[tuple[int, ItemState]]:
+    """返回群内持有指定键有效状态的成员 (QQ 号, 状态)，按 QQ 号升序。
+
+    供道具模块在无使用上下文的场景查询状态持有者（如发送消息时按
+    持有者显示名改写文本）；已过期但未清理的状态不计入。
+    """
+    users = _states.get(group_id)
+    if not users:
+        return []
+    now = time.time()
+    holders: list[tuple[int, ItemState]] = []
+    for user_id in sorted(users):
+        for state in users[user_id]:
+            if state.key == key and _state_active(state, now):
+                holders.append((user_id, state))
+                break
+    return holders
 
 
 def purge_expired_states() -> list[ItemStateExpireContext]:
