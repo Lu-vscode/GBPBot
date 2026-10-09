@@ -1619,7 +1619,13 @@ async def handle_duel_score(
         return
     record = _scores.get(event.group_id, {}).get(event.user_id)
     score = int(record["score"]) if record is not None else 0
-    await _send_text(bot, event.group_id, f"你在本群的决斗分数为 {score} 分。")
+    name = _sender_display_name(event)
+    await _send_text(
+        bot,
+        event.group_id,
+        f"{name} 的决斗分数为 {score} 分。",
+        reply_to=event.message_id,
+    )
 
 
 def _remaining_text(duel: _Duel, now: float) -> str:
