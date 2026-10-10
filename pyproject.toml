@@ -106,7 +106,7 @@ allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "
 
 [tool.ruff.lint.per-file-ignores]
 # 压力测试脚本按开发规范冻结；轮询助手以返回值表达超时，不适用 ASYNC109
-"tests/stress/_stress_test.py" = ["ASYNC109"]
+"legacy/stress/_stress_test.py" = ["ASYNC109"]
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true

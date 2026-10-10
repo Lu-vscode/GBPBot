@@ -156,6 +156,6 @@ dmypy.json
 /gbpbot-code.tar.gz
 
 # 压力测试运行产物（localstore 临时数据；报告日志由上方 *.log 规则忽略）
-/tests/stress/.stress_tmp_data/
+/legacy/stress/.stress_tmp_data/
 
 # End of https://www.toptal.com/developers/gitignore/api/python
