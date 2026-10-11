@@ -107,6 +107,8 @@ allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "
 [tool.ruff.lint.per-file-ignores]
 # 压力测试脚本按开发规范冻结；轮询助手以返回值表达超时，不适用 ASYNC109
 "legacy/stress/_stress_test.py" = ["ASYNC109"]
+# 数据编辑 CLI 以 print 向终端输出面向操作者的信息
+"scripts/data/edit/*.py" = ["T20"]
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true

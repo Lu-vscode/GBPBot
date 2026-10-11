@@ -40,10 +40,10 @@ from src.plugins.item._framework import (
 # 手势状态的持续时长（秒）：1 小时
 _DURATION_SECONDS = 3600.0
 
-# 猜拳手势值（与决斗插件的判定一致）：1 剪刀、2 石头、3 布
-_SCISSORS = 1
-_ROCK = 2
-_PAPER = 3
+# 猜拳手势值（与决斗插件的判定一致）：1 布、2 剪刀、3 石头
+_PAPER = 1
+_SCISSORS = 2
+_ROCK = 3
 
 # 正常规则的胜负判定：(挑战者手势, 接受者手势) 在此集合中表示挑战者胜
 _WINNING_GESTURES = frozenset({(1, 3), (2, 1), (3, 2)})
@@ -67,7 +67,7 @@ class _GestureItem:
     """状态的显示名（石头/剪刀/布/破平）。"""
 
     gesture: int | None
-    """触发状态的手势值（1 剪刀、2 石头、3 布）；None 表示「破平」
+    """触发状态的手势值（1 布、2 剪刀、3 石头）；None 表示「破平」
     状态（平局时触发）。"""
 
     description: str

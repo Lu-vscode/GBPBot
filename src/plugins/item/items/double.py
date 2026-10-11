@@ -213,7 +213,7 @@ register_item(
         effect=f'使用"/item.use {_ID_HALVE} @成员"使自己与对方的决斗点数整除2。',
         condition="无",
         timing="决斗开始后结束前",
-        note="没有使用次数限制",
+        note="1//2=?",
         accepts_args=True,
         can_use=_usage_error,
         handle_use=_handle_use,

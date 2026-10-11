@@ -197,14 +197,14 @@ class DuelEvent:
     """accepted/rejected/gesture 事件的动作发起者 QQ 号。"""
 
     gesture: int | None = None
-    """gesture 事件的手势值（1 剪刀、2 石头、3 布）。"""
+    """gesture 事件的手势值（1 布、2 剪刀、3 石头）。"""
 
     challenger_gesture: int | None = None
-    """settling 事件的挑战者手势（1 剪刀、2 石头、3 布）；双方出拳后的
+    """settling 事件的挑战者手势（1 布、2 剪刀、3 石头）；双方出拳后的
     结算前触发，此时两人手势必然已记录。"""
 
     opponent_gesture: int | None = None
-    """settling 事件的接受方手势（1 剪刀、2 石头、3 布）。"""
+    """settling 事件的接受方手势（1 布、2 剪刀、3 石头）。"""
 
     block_reason: str | None = None
     """challenge 事件中由处理器设置的非空文案表示取消本次发起。"""

@@ -193,11 +193,15 @@ async def _rewrite_outgoing(_bot: BaseBot, api: str, data: dict[str, Any]) -> No
 
 
 async def _handle_use(context: ItemUseContext) -> None:
-    """使用效果：登记持续 1 天的「区」状态并发送提示。
+    """使用效果：发送提示后登记持续 1 天的「区」状态。
 
-    先登记状态再发送提示：提示消息经发送钩子时称呼即被替换为
-    "区宝宝"。
+    先发送提示再登记状态：发送钩子在提示消息发出前查询状态，此时
+    状态尚未登记，提示中的称呼保持成员原名；提示发出后「区」状态
+    即刻生效。
     """
+    await context.send(
+        f"{context.user_name} 变成了“区”！\n1天之内，Bot 会一直称呼 TA 为“区宝宝”。"
+    )
     add_state(
         context.group_id,
         context.user_id,
@@ -207,9 +211,6 @@ async def _handle_use(context: ItemUseContext) -> None:
             data={"names": _name_variants(context.user_name)},
         ),
         duration_seconds=_DURATION_SECONDS,
-    )
-    await context.send(
-        f"{context.user_name} 变成了“区”！\n1天之内，Bot 会一直称呼 TA 为“区宝宝”。"
     )
 
 

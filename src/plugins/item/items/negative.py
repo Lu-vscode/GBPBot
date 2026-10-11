@@ -1,7 +1,8 @@
 """道具「负号」组（编号 044、106、107、444）：由给决斗分数加负号衍生的道具。
 
 - 044 自刎归天（灰色垃圾、消耗型）：使自己的决斗分数变为原始分数的负绝对值。
-- 106 反转（紫色史诗、消耗型）：使自己的决斗分数变为相反数。
+- 106 反转（紫色史诗、可选型）：使用 /item.use 106 @成员 使该成员的决斗
+  分数变为相反数（可以对自己使用）。
 - 107 涅槃（蓝色稀有、消耗型）：50% 的概率使自己的决斗分数变为原始分数的
   绝对值，失败无副作用；仅当自己位列决斗低分榜第一名时可用。
 - 444 阎王（蓝色稀有、可选型）：使用 /item.use 444 @成员 使该成员的决斗
@@ -49,17 +50,36 @@ async def _handle_suicide(context: ItemUseContext) -> None:
     )
 
 
+def _can_use_reverse(context: ItemUseContext) -> str | None:
+    """反转的使用前校验：必须 @ 一位群成员（可以对自己使用）。"""
+    if context.args or context.target_id is None:
+        return f"请 @ 一位群成员，用法：/item.use {context.item.item_id} @群成员"
+    return None
+
+
 async def _handle_reverse(context: ItemUseContext) -> None:
-    """反转：使自己的决斗分数变为相反数。"""
-    old = get_user_score(context.group_id, context.user_id)
+    """反转：使被 @ 成员的决斗分数变为相反数。"""
+    target_id = context.target_id
+    if target_id is None:
+        # 不可达：can_use 已校验目标存在
+        return
+    if target_id == context.user_id:
+        target_name = context.user_name
+        subject = "你的决斗分数"
+    else:
+        target_name = await member_display_name(
+            context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
+        )
+        subject = f"{target_name} 的决斗分数"
+    old = get_user_score(context.group_id, target_id)
     if old == 0:
         await context.send(
-            f"你使用了 {context.item.label}，但你的决斗分数为 0，什么也没有发生。"
+            f"你使用了 {context.item.label}，但{subject}为 0，什么也没有发生。"
         )
         return
-    context.add_score(-2 * old)
+    add_user_score(context.group_id, target_id, target_name, -2 * old)
     await context.send(
-        f"你使用了 {context.item.label}，你的决斗分数从 {old} 反转为 {-old}。"
+        f"你使用了 {context.item.label}，{subject}从 {old} 反转为 {-old}。"
     )
 
 
@@ -134,12 +154,14 @@ register_item(
         item_id="106",
         name="反转",
         quality=Quality.PURPLE,
-        types=(ItemType.CONSUMABLE,),
-        description="反转自己的决斗分数。",
-        effect="使用后使自己的决斗分数变为相反数。",
+        types=(ItemType.OPTIONAL,),
+        description="反转一个人的决斗分数。",
+        effect='使用"/item.use 106 @成员"将其决斗分数变为相反数（可以对自己使用）。',
         condition="无",
         timing="任意",
         note="一念神魔",
+        accepts_args=True,
+        can_use=_can_use_reverse,
         handle_use=_handle_reverse,
     )
 )
