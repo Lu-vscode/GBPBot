@@ -1,4 +1,4 @@
-"""道具「？！区区？！」（编号 678）：黑色诅咒、诅咒型。
+"""道具「！？区区？！」（编号 678）：黑色诅咒、诅咒型。
 
 获得后不进入库存，由主模块先发送完整信息、随后自动使用：获得持续
 1 天的「区」状态。状态有效期间，Bot 发送的群消息中涉及该成员显示名
@@ -217,7 +217,7 @@ async def _handle_use(context: ItemUseContext) -> None:
 register_item(
     ItemDefinition(
         item_id=_ITEM_ID,
-        name="？！区区？！",
+        name="！？区区？！",
         quality=Quality.BLACK_CURSE,
         types=(ItemType.CURSE,),
         description="你是一个可爱的区宝宝🥰",

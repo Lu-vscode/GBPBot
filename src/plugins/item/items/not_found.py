@@ -1,0 +1,146 @@
+"""道具「Not Found」（编号 404）：黑色诅咒、诅咒型。
+
+获得后不进入库存，由主模块先发送完整信息、随后自动使用：获得持续
+1 小时的「404」状态。状态有效期间该成员无法发起决斗，也不会被他人
+发起决斗——发起流程在 challenge 事件中被本模块阻断（设置 block_reason
+为"404 Not Found"，由决斗插件发送提示并取消决斗创建，见
+_shared/services.py 的决斗事件服务）。
+
+状态到期时立即尝试发送恢复提示（Bot 不在线或发送失败时只记录日志、
+不补发）。
+"""
+
+from typing import Any
+
+from nonebot import get_bots, logger
+from nonebot.adapters.onebot.v11 import Bot
+
+from src.plugins._shared.onebot import send_group_text, truncate_name
+from src.plugins._shared.services import (
+    DuelEvent,
+    DuelEventKind,
+    DuelEventService,
+    require_service,
+)
+from src.plugins.item._framework import (
+    ItemDefinition,
+    ItemState,
+    ItemStateExpireContext,
+    ItemType,
+    ItemUseContext,
+    Quality,
+    add_state,
+    get_state,
+    register_item,
+)
+
+# 道具编号与状态键
+_ITEM_ID = "404"
+_STATE_KEY = f"{_ITEM_ID}.not_found"
+
+# 「404」状态的持续时长（秒）：1 小时
+_DURATION_SECONDS = 3600.0
+
+# 阻断决斗发起时发送的提示文案（自身发起与被发起时相同）
+_BLOCK_REASON = "404 Not Found"
+
+# 消息中群昵称的最大显示长度（字符数，与主模块保持一致）
+_NICKNAME_MAX_LENGTH = 12
+
+# 决斗事件服务（由决斗插件提供；_framework 已 require("duel")
+# 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
+_event_service = require_service(DuelEventService)
+
+
+def _has_state(group_id: int, user_id: int) -> bool:
+    """判断成员是否持有有效的「404」状态（已过期等待清理的不计入）。"""
+    return get_state(group_id, user_id, _STATE_KEY) is not None
+
+
+async def _on_duel_event(event: DuelEvent) -> None:
+    """决斗事件处理：发起流程校验通过后，任一参与方持有有效的「404」
+    状态时阻断本次发起（设置 block_reason，决斗不会被创建）。"""
+    if event.kind is not DuelEventKind.CHALLENGE:
+        return
+    if _has_state(event.group_id, event.challenger_id) or _has_state(
+        event.group_id, event.opponent_id
+    ):
+        event.block_reason = _BLOCK_REASON
+
+
+_event_service.subscribe(_on_duel_event)
+
+
+def _state_name(data: dict[str, Any], user_id: int) -> str:
+    """从状态附加数据中取出成员显示名（缺失时回退为 QQ 号，并截断）。"""
+    raw = str(data.get("user_name") or "").strip()
+    if not raw:
+        return f"QQ {user_id}"
+    return truncate_name(raw, _NICKNAME_MAX_LENGTH)
+
+
+async def _handle_use(context: ItemUseContext) -> None:
+    """使用效果：先登记持续 1 小时的「404」状态，再发送生效提示。
+
+    先登记状态再发送提示：提示经发送排队期间状态已生效，期间发起的
+    决斗也能被正常阻断。
+    """
+    add_state(
+        context.group_id,
+        context.user_id,
+        state=ItemState(
+            key=_STATE_KEY,
+            item_id=_ITEM_ID,
+            data={
+                "user_name": context.user_name,
+                "bot_self_id": context.bot.self_id,
+            },
+        ),
+        duration_seconds=_DURATION_SECONDS,
+    )
+    await context.send(
+        f"@{context.user_name}\n"
+        f"{_BLOCK_REASON}\n"
+        "你请求的页面似乎不存在，1 小时内无法发起决斗，"
+        "也没有人能向你发起决斗。"
+    )
+
+
+async def _handle_state_expire(context: ItemStateExpireContext) -> None:
+    """状态到期回调：立即尝试发送恢复提示。
+
+    机器人不在线或发送失败时只记录日志、不补发。
+    """
+    data = context.state.data
+    name = _state_name(data, context.user_id)
+    bot_id = str(data.get("bot_self_id") or "")
+    bot = get_bots().get(bot_id)
+    if not isinstance(bot, Bot):
+        logger.warning(
+            f"“404”状态结束提示未发送：机器人 {bot_id or '未知'} 不在线"
+            f"（群 {context.group_id}，成员 {context.user_id}）"
+        )
+        return
+    await send_group_text(
+        bot,
+        context.group_id,
+        f"@{name}\n404 Found\n“404”状态已结束，你的决斗功能已恢复。",
+        label="道具消息",
+    )
+
+
+register_item(
+    ItemDefinition(
+        item_id=_ITEM_ID,
+        name="Not Found",
+        quality=Quality.BLACK_CURSE,
+        types=(ItemType.CURSE,),
+        description="404 Not Found",
+        effect="使用后获得持续1小时的“404”状态，无法发起/被发起决斗。",
+        condition="无",
+        timing="自动使用",
+        note="404 Not Found",
+        handle_use=_handle_use,
+        handle_state_expire=_handle_state_expire,
+    )
+)
