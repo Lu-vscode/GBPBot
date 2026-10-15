@@ -193,7 +193,7 @@ register_item(
         timing="决斗发起后结束前",
         durability=f"{_DURABILITY_TOTAL}/{_DURABILITY_TOTAL}",
         detail_durability=_detail_durability,
-        note="强大的对策道具",
+        note="逃跑并不可耻",
         accepts_args=True,
         can_use=_can_use,
         handle_consume=_handle_consume,

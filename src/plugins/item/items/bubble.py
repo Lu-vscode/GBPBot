@@ -2,12 +2,13 @@
 
 使用 /item.use 924 @传递对象 把花传出去：有 1.1^(-n) 的概率（n 为
 自己的“泡沫”状态层数，没有该状态视为 0 层）传递成功，决斗分数增加
-n+1、清空自己的“泡沫”状态，传递对象获得 n+1 层“泡沫”状态和一个
-击鼓传花道具；否则传递失败，清空自己的“泡沫”状态，决斗分数减少 n+1。
+(n+1)×10、清空自己的“泡沫”状态，传递对象获得 n+1 层“泡沫”状态和
+一个击鼓传花道具；否则传递失败，清空自己的“泡沫”状态，决斗分数减少
+(n+1)×10。
 
 “泡沫”状态（状态键 924.bubble，同键覆盖：层数累加并重置倒计时）：
-获得后开始 1 小时倒计时，倒计时归零时使拥有者失去等同于层数的决斗
-分数并清空“泡沫”状态；到期结算与提示登记在过期状态被清理时完成。
+获得后开始 1 小时倒计时，倒计时归零时使拥有者失去等同于层数×10 的
+决斗分数并清空“泡沫”状态；到期结算与提示登记在过期状态被清理时完成。
 
 到期提示不在到期时立即发出：先在队列保留 10 分钟，期间机器人向同群
 发送其它消息时在其后延迟 1 秒跟随发出，未能跟随则静默丢弃（与决斗
@@ -57,6 +58,9 @@ _STATE_SECONDS = 3600.0
 
 # 传递成功的概率底数：1.1^(-n)（n 为“泡沫”状态层数）
 _CHANCE_BASE = 1.1
+
+# 决斗分数换算系数：每 1 层“泡沫”对应 10 点决斗分数（结算与文案均按此计算）
+_SCORE_PER_LAYER = 10
 
 # 消息中群昵称的最大显示长度（字符数，与主模块保持一致）
 _NICKNAME_MAX_LENGTH = 12
@@ -116,10 +120,11 @@ async def _handle_use(context: ItemUseContext) -> None:
         context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
     )
     gained = layers + 1
+    score = gained * _SCORE_PER_LAYER
     # 同步段：判定并完成全部数据变更（状态、道具与分数），再发送播报
     if random.random() < _CHANCE_BASE ** (-layers):
         remove_state(context.group_id, context.user_id, _STATE_KEY)
-        context.add_score(gained)
+        context.add_score(score)
         target_layers = _layers_of(get_state(context.group_id, target_id, _STATE_KEY))
         add_state(
             context.group_id,
@@ -137,14 +142,14 @@ async def _handle_use(context: ItemUseContext) -> None:
             f"{context.user_name} 使用了 {context.item.label}，花传了出去。\n"
             f"{target_name} 一把接住：获得 {gained} 层“泡沫”{total}"
             f"和一件 {context.item.label}。\n"
-            f"{context.user_name} 决斗分数 +{gained}。"
+            f"{context.user_name} 决斗分数 +{score}。"
         )
         return
     remove_state(context.group_id, context.user_id, _STATE_KEY)
-    context.add_score(-gained)
+    context.add_score(-score)
     await context.send(
         f"{context.user_name} 使用了 {context.item.label}，鼓声一停，花掉了。\n"
-        f"{context.user_name} 的 {layers} 层“泡沫”散了，决斗分数 -{gained}。"
+        f"{context.user_name} 的 {layers} 层“泡沫”散了，决斗分数 -{score}。"
     )
 
 
@@ -285,11 +290,12 @@ async def _handle_state_expire(context: ItemStateExpireContext) -> None:
         # 不可达：登记的“泡沫”状态层数至少为 1；数据异常时只做清理
         return
     name = _state_name(context.state.data, context.user_id)
-    add_user_score(context.group_id, context.user_id, name, -layers)
+    score = layers * _SCORE_PER_LAYER
+    add_user_score(context.group_id, context.user_id, name, -score)
     defer_reminder(
         group_id=context.group_id,
         text=(
-            f"@{name}\n鼓声停了，{name} 的 {layers} 层“泡沫”破了，决斗分数 -{layers}。"
+            f"@{name}\n鼓声停了，{name} 的 {layers} 层“泡沫”破了，决斗分数 -{score}。"
         ),
     )
 
@@ -306,12 +312,12 @@ register_item(
         ),
         effect=(
             f'使用"/item.use {_ITEM_ID} @传递对象"后，有 1.1^(-n) 的概率'
-            "（n 指自己的“泡沫”状态层数）传递成功：决斗分数增加 n+1，"
+            "（n 指自己的“泡沫”状态层数）传递成功：决斗分数增加 (n+1)×10，"
             "清空自己的“泡沫”状态，传递对象获得 n+1 层“泡沫”状态和"
             "一个击鼓传花道具；否则传递失败：清空自己的“泡沫”状态，"
-            "自己的决斗分数减少 n+1。\n"
+            "自己的决斗分数减少 (n+1)×10。\n"
             "“泡沫”状态：获得后开始 1 小时倒计时，层数可累加，层数变化后"
-            "倒计时重置，倒计时归零时使拥有者失去<层数>点决斗分数并"
+            "倒计时重置，倒计时归零时使拥有者失去<层数>×10 点决斗分数并"
             "清空“泡沫”状态。"
         ),
         condition="无",
