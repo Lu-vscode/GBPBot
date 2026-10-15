@@ -162,7 +162,8 @@ class DuelEventKind(StrEnum):
     """决斗超时认领移除后触发。"""
 
     CANCELED = "canceled"
-    """决斗点数归零被取消后触发（决斗已从进行中移除，不会再结算）。"""
+    """决斗被取消后触发（点数归零或经决斗取消服务主动取消；决斗已从
+    进行中移除，不会再结算）。"""
 
 
 @dataclass
@@ -357,6 +358,32 @@ class DuelMultiplierService(Protocol):
         返回:
             缩放结果（缩放后的点数与决斗是否被取消）；双方之间没有
             进行中的决斗时返回 None。
+        """
+        ...
+
+
+@runtime_checkable
+class DuelCancelService(Protocol):
+    """决斗取消服务（由猜拳决斗插件提供）。"""
+
+    async def cancel_duel(
+        self, group_id: int, user_a: int, user_b: int
+    ) -> DuelSnapshot | None:
+        """取消双方之间进行中的决斗。
+
+        决斗不限发起方向与是否已被接受；从进行中移除并发布
+        canceled 事件（订阅方可据此清理与该决斗相关的登记），此后
+        该决斗不再结算；未找到符合条件的决斗时不做任何事并返回
+        None。
+
+        参数:
+            group_id: 决斗所在群号。
+            user_a: 决斗一方的成员 QQ 号。
+            user_b: 决斗另一方的成员 QQ 号。
+
+        返回:
+            被取消决斗的只读快照；双方之间没有进行中的决斗时返回
+            None。
         """
         ...
 

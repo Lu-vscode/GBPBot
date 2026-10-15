@@ -1,13 +1,14 @@
-"""决斗对外服务的实现（机器人接受、挑衅与点数缩放）。
+"""决斗对外服务的实现（机器人接受、挑衅、点数缩放与取消）。
 
-本模块实现三个跨插件服务契约（见 _shared/services.py），服务实例
-（bot_accept_service、provoke_service、multiplier_service）由插件主
-模块统一注册到服务注册中心：
+本模块实现四个跨插件服务契约（见 _shared/services.py），服务实例
+（bot_accept_service、provoke_service、multiplier_service、
+cancel_service）由插件主模块统一注册到服务注册中心：
 - DuelBotAcceptService：供道具等插件校验机器人接受概率函数表达式；
 - DuelProvokeService：供道具等插件强制对方接受决斗，并由机器人代替
   对方发送猜拳表情；
 - DuelMultiplierService：供道具等插件缩放进行中决斗的点数，缩放到 0
-  时取消决斗并发布取消事件。
+  时取消决斗并发布取消事件；
+- DuelCancelService：供道具等插件主动取消进行中的决斗并发布取消事件。
 """
 
 from nonebot import logger
@@ -15,6 +16,7 @@ from nonebot.adapters.onebot.v11 import Bot
 
 from src.plugins._shared.services import (
     DuelBotAcceptService,
+    DuelCancelService,
     DuelEventKind,
     DuelMultiplierService,
     DuelProvokeService,
@@ -123,7 +125,28 @@ class _DuelMultiplierService(DuelMultiplierService):
         return DuelScaleOutcome(multiplier=new, canceled=False)
 
 
+class _DuelCancelService(DuelCancelService):
+    """决斗取消服务的实现：供道具等插件主动取消进行中的决斗。"""
+
+    async def cancel_duel(
+        self, group_id: int, user_a: int, user_b: int
+    ) -> DuelSnapshot | None:
+        """取消双方之间进行中的决斗；在同步段移除后发布取消事件。"""
+        duel = find_pair_duel(group_id, user_a, user_b)
+        if duel is None:
+            return None
+        # 同步段完成取消（从决斗列表移除），再发布取消事件
+        remove_duel(duel)
+        logger.info(
+            f"群 {group_id} 中 {duel.challenger_id} 与 {duel.opponent_id} "
+            f"的决斗（点数 {duel.multiplier}）被取消"
+        )
+        await fire_duel_event(make_duel_event(duel, DuelEventKind.CANCELED))
+        return snapshot(duel)
+
+
 # 服务实例（由插件主模块统一注册）
 bot_accept_service = _DuelBotAcceptService()
 provoke_service = _DuelProvokeService()
 multiplier_service = _DuelMultiplierService()
+cancel_service = _DuelCancelService()

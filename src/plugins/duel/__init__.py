@@ -15,9 +15,11 @@ _shared/services.py）供其它插件增减分数与查询高/低分榜第一名
 settling 事件的处理器可接管结算），机器人接受概率函数服务
 （DuelBotAcceptService：供道具等插件校验并改写概率函数表达式）、
 决斗挑衅服务（DuelProvokeService：供道具等插件强制对方接受决斗，
-并由机器人代替对方发送猜拳表情）与决斗点数缩放服务
+并由机器人代替对方发送猜拳表情）、决斗点数缩放服务
 （DuelMultiplierService：供道具等插件缩放进行中决斗的点数，缩放
-到 0 时取消决斗并发布取消事件）；
+到 0 时取消决斗并发布取消事件）与决斗取消服务
+（DuelCancelService：供道具等插件主动取消进行中的决斗并发布
+取消事件）；
 机器人名单（BOT_LIST）由 _shared/config.py
 的共享配置提供，供各插件共享；群聊消息发送、群昵称获取与截断等通用
 逻辑复用 _shared/onebot.py 的共享工具。
@@ -56,6 +58,7 @@ from src.plugins._shared.onebot import (
 )
 from src.plugins._shared.services import (
     DuelBotAcceptService,
+    DuelCancelService,
     DuelEvent,
     DuelEventKind,
     DuelEventService,
@@ -106,6 +109,7 @@ from src.plugins.duel._messages import (
 from src.plugins.duel._scores import rank_entries, score_service
 from src.plugins.duel._services import (
     bot_accept_service,
+    cancel_service,
     multiplier_service,
     provoke_service,
 )
@@ -155,6 +159,7 @@ register_service(DuelEventService, event_service)
 register_service(DuelBotAcceptService, bot_accept_service)
 register_service(DuelProvokeService, provoke_service)
 register_service(DuelMultiplierService, multiplier_service)
+register_service(DuelCancelService, cancel_service)
 
 
 def _truncate_name(name: str) -> str:

@@ -241,7 +241,8 @@ def get_rank_entries(group_id: int) -> list[tuple[int, str, int]]:
 
     总榜为决斗高分榜与反转的决斗低分榜的拼接：全部非零分数的成员
     按分数从高到低排列、同分按 QQ 号升序排列；0 分或没有分数记录的
-    成员不在榜上；供道具模块按榜上相邻位置处理（如交换分数）。
+    成员不在榜上；供道具模块遍历全部非零分数成员（如全体加 1 分、
+    随机抽选）或按榜上相邻位置处理（如交换分数）。
     """
     return _score_service.rank_entries(group_id)
 

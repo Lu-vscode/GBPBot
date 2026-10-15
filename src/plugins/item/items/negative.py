@@ -3,7 +3,7 @@
 - 044 自刎归天（灰色垃圾、消耗型）：使自己的决斗分数变为原始分数的负绝对值。
 - 106 反转（紫色史诗、可选型）：使用 /item.use 106 @成员 使该成员的决斗
   分数变为相反数（可以对自己使用）。
-- 107 涅槃（蓝色稀有、消耗型）：50% 的概率使自己的决斗分数变为原始分数的
+- 107 涅槃（蓝色稀有、消耗型）：80% 的概率使自己的决斗分数变为原始分数的
   绝对值，失败无副作用；仅当自己位列决斗低分榜第一名时可用。
 - 444 阎王（蓝色稀有、可选型）：使用 /item.use 444 @成员 使该成员的决斗
   分数变为其原始分数的负绝对值；仅当自己位列决斗低分榜第一名时可用。
@@ -27,7 +27,7 @@ from src.plugins.item._framework import (
 _NICKNAME_MAX_LENGTH = 12
 
 # 涅槃的生效概率
-_NIRVANA_CHANCE = 0.5
+_NIRVANA_CHANCE = 0.8
 
 
 def _lowest_only_error(context: ItemUseContext) -> str | None:
@@ -89,7 +89,7 @@ def _can_use_nirvana(context: ItemUseContext) -> str | None:
 
 
 async def _handle_nirvana(context: ItemUseContext) -> None:
-    """涅槃：50% 的概率使自己的决斗分数变为原始分数的绝对值。"""
+    """涅槃：80% 的概率使自己的决斗分数变为原始分数的绝对值。"""
     old = get_user_score(context.group_id, context.user_id)
     if random.random() >= _NIRVANA_CHANCE:
         await context.send(
@@ -173,7 +173,7 @@ register_item(
         quality=Quality.BLUE,
         types=(ItemType.CONSUMABLE,),
         description="涅槃重生",
-        effect="使用后有50%的概率使自己的决斗分数变为原始分数的绝对值。",
+        effect="使用后有80%的概率使自己的决斗分数变为原始分数的绝对值。",
         condition="自身位列决斗低分榜第一名",
         timing="任意",
         note="亡者不亡",
