@@ -4,9 +4,13 @@
 DUEL_MAX_MULTIPLIER 配置，默认 100），被 @ 的成员可通过
 `/duel.accept @成员` 接受或 `/duel.reject @成员` 拒绝；接受后双方发送
 QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者分数 +点数、负者分数
--点数，平局分数不变；各群分数相互独立，分数数据使用 localstore 长期
+-点数，平局分数不变；成员所需的猜拳表情数量默认为 1，可由道具经
+手势配额服务提高（见 _state.required_gestures），多手势的胜负按逐
+手势聚合判定（见 _flow.py）；各群分数相互独立，分数数据使用 localstore 长期
 存储在本地，并且作为"决斗分数服务"经跨插件服务注册中心（见
-_shared/services.py）供其它插件增减分数与查询高/低分榜第一名；
+_shared/services.py）供其它插件增减分数与查询高/低分榜第一名，同时
+提供决斗分数拦截服务（DuelScoreInterceptService：供道具等插件在
+分数改变生效前拦截并改写变化量）；
 `/duel.rank` 可查看本群分数排行榜（以合并转发发送），`/duel.score`
 可查看自己在本群的决斗分数，`/duel.status` 可查看自己在本群的决斗
 状态。除分数服务外，还对外提供决斗状态服务
@@ -19,7 +23,9 @@ settling 事件的处理器可接管结算），机器人接受概率函数服�
 （DuelMultiplierService：供道具等插件缩放进行中决斗的点数，缩放
 到 0 时取消决斗并发布取消事件）与决斗取消服务
 （DuelCancelService：供道具等插件主动取消进行中的决斗并发布
-取消事件）；
+取消事件）与决斗手势配额服务（DuelGestureQuotaService：供道具等
+插件注册手势配额提供者，提高成员在一场决斗中需要发送的猜拳表情
+数量，如“强运”效果）；
 机器人名单（BOT_LIST）由 _shared/config.py
 的共享配置提供，供各插件共享；群聊消息发送、群昵称获取与截断等通用
 逻辑复用 _shared/onebot.py 的共享工具。
@@ -62,8 +68,10 @@ from src.plugins._shared.services import (
     DuelEvent,
     DuelEventKind,
     DuelEventService,
+    DuelGestureQuotaService,
     DuelMultiplierService,
     DuelProvokeService,
+    DuelScoreInterceptService,
     DuelScoreService,
     DuelStateService,
     register_service,
@@ -106,21 +114,24 @@ from src.plugins.duel._messages import (
     send_forward,
     send_text,
 )
-from src.plugins.duel._scores import rank_entries, score_service
+from src.plugins.duel._scores import intercept_service, rank_entries, score_service
 from src.plugins.duel._services import (
     bot_accept_service,
     cancel_service,
+    gesture_quota_service,
     multiplier_service,
     provoke_service,
 )
 from src.plugins.duel._state import (
     Duel,
+    completed_gestures,
     duel_ready,
     duels,
     find_pair_duel,
     find_pending_duel,
     find_provoked_duel,
     remove_duel,
+    required_gestures,
     state_service,
     take_gesture,
 )
@@ -154,12 +165,14 @@ _bot_list = get_bot_list()
 # 将决斗能力注册为跨插件服务（契约见 _shared/services.py），
 # 供签到、道具等插件使用
 register_service(DuelScoreService, score_service)
+register_service(DuelScoreInterceptService, intercept_service)
 register_service(DuelStateService, state_service)
 register_service(DuelEventService, event_service)
 register_service(DuelBotAcceptService, bot_accept_service)
 register_service(DuelProvokeService, provoke_service)
 register_service(DuelMultiplierService, multiplier_service)
 register_service(DuelCancelService, cancel_service)
+register_service(DuelGestureQuotaService, gesture_quota_service)
 
 
 def _truncate_name(name: str) -> str:
@@ -616,6 +629,37 @@ def _remaining_text(duel: Duel, now: float) -> str:
     return f"距超时约 {remaining} 分钟"
 
 
+def _gesture_state_text(*, sent: int, quota: int, by_bot: bool) -> str:
+    """生成成员自己视角下的出拳状态描述。
+
+    by_bot 为 True 表示该成员的手势由机器人代替发送（被挑衅）；
+    配额为 1 时沿用原有的简明文案，大于 1 时附上进度（已发送个数）。
+    """
+    if by_bot:
+        if sent == 0:
+            state = (
+                f"你的猜拳表情将由 Bot 代替发送（共 {quota} 个）"
+                if quota > 1
+                else "你的猜拳表情将由 Bot 代替发送"
+            )
+        elif sent < quota:
+            state = f"Bot 已代替你发送 {sent}/{quota} 个猜拳表情"
+        else:
+            state = "Bot 已代替你发送猜拳表情，等待对方发送猜拳表情"
+        return state
+    if sent == 0:
+        return (
+            f"等待你发送猜拳表情（共需发送 {quota} 个）"
+            if quota > 1
+            else "等待你发送猜拳表情"
+        )
+    if sent < quota:
+        return f"你已发送 {sent}/{quota} 个猜拳表情，等待你继续发送"
+    if quota > 1:
+        return f"你已发送 {sent}/{quota} 个猜拳表情，等待对方发送猜拳表情"
+    return "你已出拳，等待对方发送猜拳表情"
+
+
 def _status_lines(group_id: int, user_id: int) -> list[str]:
     """生成成员在本群进行中决斗的状态描述行（按创建顺序）。"""
     now = time.monotonic()
@@ -639,21 +683,19 @@ def _status_lines(group_id: int, user_id: int) -> list[str]:
                     f"（可使用 /duel.accept 接受），{suffix}。"
                 )
             continue
+        other_id = (
+            duel.opponent_id if user_id == duel.challenger_id else duel.challenger_id
+        )
         other_name = (
             duel.opponent_name
             if user_id == duel.challenger_id
             else duel.challenger_name
         )
-        if duel.provoked_by_bot and user_id == duel.opponent_id:
-            # 被挑衅的一方：手势由机器人代替，自己发送的猜拳表情无效
-            if user_id not in duel.gestures:
-                state = "你的猜拳表情将由 Bot 代替发送"
-            else:
-                state = "Bot 已代替你发送猜拳表情，等待对方发送猜拳表情"
-        elif user_id not in duel.gestures:
-            state = "等待你发送猜拳表情"
-        else:
-            state = "你已出拳，等待对方发送猜拳表情"
+        state = _gesture_state_text(
+            sent=len(duel.gestures.get(user_id, [])),
+            quota=required_gestures(group_id, user_id, other_id),
+            by_bot=duel.provoked_by_bot and user_id == duel.opponent_id,
+        )
         lines.append(
             f"你与 {other_name} 的决斗（×{duel.multiplier}）：{state}，{suffix}。"
         )
@@ -674,7 +716,7 @@ def _all_status_lines(group_id: int) -> list[str]:
                 f"（×{duel.multiplier}）：等待对方接受，{suffix}。"
             )
             continue
-        if duel.provoked_by_bot and duel.opponent_id not in duel.gestures:
+        if duel.provoked_by_bot and not completed_gestures(duel, duel.opponent_id):
             # 被挑衅一方的手势由机器人代替（代替发送前仅短暂经过）
             state = f"等待 Bot 代替 {duel.opponent_name} 发送猜拳表情"
         else:
@@ -682,9 +724,22 @@ def _all_status_lines(group_id: int) -> list[str]:
                 (duel.challenger_id, duel.challenger_name),
                 (duel.opponent_id, duel.opponent_name),
             )
-            pending_names = [name for uid, name in players if uid not in duel.gestures]
-            if len(pending_names) == 1:
-                state = f"等待 {pending_names[0]} 发送猜拳表情"
+            pending = [
+                (uid, name)
+                for uid, name in players
+                if not completed_gestures(duel, uid)
+            ]
+            if len(pending) == 1:
+                pending_id, pending_name = pending[0]
+                other_id = (
+                    duel.opponent_id
+                    if pending_id == duel.challenger_id
+                    else duel.challenger_id
+                )
+                sent = len(duel.gestures.get(pending_id, []))
+                quota = required_gestures(group_id, pending_id, other_id)
+                progress = f"（已发送 {sent}/{quota}）" if quota > 1 else ""
+                state = f"等待 {pending_name} 发送猜拳表情{progress}"
             else:
                 # 双方都未出拳（双方均已出拳时会立即结算，不会留在列表中）
                 state = "等待双方发送猜拳表情"

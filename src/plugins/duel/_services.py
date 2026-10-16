@@ -1,14 +1,17 @@
-"""决斗对外服务的实现（机器人接受、挑衅、点数缩放与取消）。
+"""决斗对外服务的实现（机器人接受、挑衅、点数缩放、取消与手势配额）。
 
-本模块实现四个跨插件服务契约（见 _shared/services.py），服务实例
+本模块实现五个跨插件服务契约（见 _shared/services.py），服务实例
 （bot_accept_service、provoke_service、multiplier_service、
-cancel_service）由插件主模块统一注册到服务注册中心：
+cancel_service、gesture_quota_service）由插件主模块统一注册到服务
+注册中心：
 - DuelBotAcceptService：供道具等插件校验机器人接受概率函数表达式；
 - DuelProvokeService：供道具等插件强制对方接受决斗，并由机器人代替
   对方发送猜拳表情；
 - DuelMultiplierService：供道具等插件缩放进行中决斗的点数，缩放到 0
   时取消决斗并发布取消事件；
-- DuelCancelService：供道具等插件主动取消进行中的决斗并发布取消事件。
+- DuelCancelService：供道具等插件主动取消进行中的决斗并发布取消事件；
+- DuelGestureQuotaService：供道具等插件注册手势配额提供者，提高成
+  员在一场决斗中需要发送的猜拳表情数量（如“强运”效果）。
 """
 
 from nonebot import logger
@@ -18,6 +21,8 @@ from src.plugins._shared.services import (
     DuelBotAcceptService,
     DuelCancelService,
     DuelEventKind,
+    DuelGestureQuotaProvider,
+    DuelGestureQuotaService,
     DuelMultiplierService,
     DuelProvokeService,
     DuelScaleOutcome,
@@ -27,6 +32,7 @@ from src.plugins.duel._config import accept_expr_error
 from src.plugins.duel._events import fire_duel_event, make_duel_event
 from src.plugins.duel._flow import send_bot_rps
 from src.plugins.duel._state import (
+    add_gesture_quota_provider,
     find_pair_duel,
     find_pending_duel,
     find_provoked_duel,
@@ -145,8 +151,17 @@ class _DuelCancelService(DuelCancelService):
         return snapshot(duel)
 
 
+class _DuelGestureQuotaService(DuelGestureQuotaService):
+    """决斗手势配额服务的实现：供道具等插件注册手势配额提供者。"""
+
+    def add_quota_provider(self, provider: DuelGestureQuotaProvider) -> None:
+        """注册手势配额提供者（同一提供者重复注册会被忽略）。"""
+        add_gesture_quota_provider(provider)
+
+
 # 服务实例（由插件主模块统一注册）
 bot_accept_service = _DuelBotAcceptService()
 provoke_service = _DuelProvokeService()
 multiplier_service = _DuelMultiplierService()
 cancel_service = _DuelCancelService()
+gesture_quota_service = _DuelGestureQuotaService()

@@ -1,10 +1,15 @@
 """决斗流程：胜负判定、结算与机器人出手。
 
-胜负判定按手势组合（见 _gestures.WINNING_GESTURES）进行；结算流程
-发布 settling 事件（订阅方可改写点数与胜负、设置默认结算消息前缀，
-或接管结算），按最终点数更新双方分数并播报结果，随后发布 settled
-事件；机器人代打（机器人掷骰接受决斗后出手，或被挑衅时代替对方出手）
-发送猜拳表情并记录为对方手势，随后检查双方是否均已出手并认领结算。
+胜负判定按手势组合（见 _gestures.WINNING_GESTURES）进行；一方需要
+多个手势时（如道具效果，数量见 _state.required_gestures）按逐手势
+与对方手势判定的聚合结果判定：至少一个手势胜则该方胜、否则至少
+一个手势平则平局、否则该方负（双方都需要多个手势时以发起方为
+聚合方、另一方取第一个手势）。结算流程发布 settling 事件（订阅方
+可改写点数与胜负、设置默认结算消息前缀，或接管结算），按最终点数
+更新双方分数并播报结果，随后发布 settled 事件；机器人代打（机器人
+掷骰接受决斗后出手，或被挑衅时代替对方出手）循环发送猜拳表情并
+记录为对方手势直至满足所需数量，随后检查双方是否均已完成出手并
+认领结算。
 """
 
 from nonebot import logger
@@ -16,19 +21,56 @@ from src.plugins.duel._events import fire_duel_event, make_duel_event
 from src.plugins.duel._gestures import WINNING_GESTURES
 from src.plugins.duel._messages import fetch_rps_result, send_rps, send_text
 from src.plugins.duel._scores import update_score
-from src.plugins.duel._state import Duel, duel_ready, record_gesture, remove_duel
+from src.plugins.duel._state import (
+    Duel,
+    completed_gestures,
+    duel_ready,
+    duels,
+    record_gesture,
+    remove_duel,
+)
+
+
+def _gesture_outcome(gesture: int, other: int) -> int:
+    """单组手势的判定结果：1 胜、0 平、-1 负。"""
+    if gesture == other:
+        return 0
+    if (gesture, other) in WINNING_GESTURES:
+        return 1
+    return -1
+
+
+def _aggregate_outcome(gestures: list[int], other: int) -> int:
+    """聚合多手势方对对方单个手势的逐手势判定结果。
+
+    至少一个手势胜则返回 1；否则至少一个手势平则返回 0；否则返回 -1。
+    """
+    outcomes = [_gesture_outcome(gesture, other) for gesture in gestures]
+    if 1 in outcomes:
+        return 1
+    if 0 in outcomes:
+        return 0
+    return -1
 
 
 def _decide_winner(duel: Duel) -> tuple[int, str, int, str] | None:
     """判定胜负，返回 (胜者 QQ 号, 胜者群昵称, 负者 QQ 号, 负者群昵称)。
 
-    平局时返回 None；调用前须保证双方均已出手。
+    平局时返回 None；调用前须保证双方均已出手。一方需要多个手势时
+    按逐手势聚合判定（见 _aggregate_outcome），另一方取第一个手势；
+    双方都需要多个手势时同样以发起方为聚合方。
     """
-    challenger_gesture = duel.gestures[duel.challenger_id]
-    opponent_gesture = duel.gestures[duel.opponent_id]
-    if challenger_gesture == opponent_gesture:
+    challenger_gestures = duel.gestures[duel.challenger_id]
+    opponent_gestures = duel.gestures[duel.opponent_id]
+    if len(challenger_gestures) > 1:
+        outcome = _aggregate_outcome(challenger_gestures, opponent_gestures[0])
+    elif len(opponent_gestures) > 1:
+        outcome = -_aggregate_outcome(opponent_gestures, challenger_gestures[0])
+    else:
+        outcome = _gesture_outcome(challenger_gestures[0], opponent_gestures[0])
+    if outcome == 0:
         return None
-    if (challenger_gesture, opponent_gesture) in WINNING_GESTURES:
+    if outcome > 0:
         return (
             duel.challenger_id,
             duel.challenger_name,
@@ -89,8 +131,8 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
         DuelEventKind.SETTLING,
         winner_id=result[0] if result is not None else None,
         loser_id=result[2] if result is not None else None,
-        challenger_gesture=duel.gestures[duel.challenger_id],
-        opponent_gesture=duel.gestures[duel.opponent_id],
+        challenger_gestures=tuple(duel.gestures[duel.challenger_id]),
+        opponent_gestures=tuple(duel.gestures[duel.opponent_id]),
     )
     await fire_duel_event(event)
     final = _final_result(duel, result, event)
@@ -172,32 +214,46 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
 
 
 async def send_bot_rps(bot: Bot, duel: Duel) -> None:
-    """机器人发送猜拳表情并记录为对方（接受方）的手势，随后检查结算。
+    """机器人循环发送猜拳表情并记录为对方（接受方）的手势，随后检查结算。
 
     用于两种场景：机器人掷骰接受决斗后出手（@机器人的决斗），以及
-    被挑衅的决斗中代替对方出手。发送猜拳表情无法指定结果、发送接口
-    也不返回结果，需在发送后通过 get_msg 查询该消息读取实际结果；
-    查询失败时本次不记录手势（机器人自己参与的决斗仍可在协议端
-    上报该消息时补记手势）。
+    被挑衅的决斗中代替对方出手。对方需要多个手势时（见
+    _state.completed_gestures）循环发送直至记录完全部所需数量。
+    发送猜拳表情无法指定结果、发送接口也不返回结果，需在发送后通过
+    get_msg 查询该消息读取实际结果；查询失败时本次不记录手势
+    （机器人自己参与的决斗仍可在协议端上报该消息时补记手势）。
+    代发期间机器人自己的消息事件不记录手势（见 _state.take_gesture），
+    避免与回查结果重复记录。
     """
-    message_id = await send_rps(bot, duel.group_id)
-    if message_id is None:
-        return
-    gesture = await fetch_rps_result(bot, message_id)
-    if gesture is None:
-        logger.warning(
-            f"未能获取机器人猜拳表情（消息 {message_id}）的结果，本次未记录手势"
-        )
-        return
-    # 记录手势（同步段，避免并发事件重复记录），随后发布事件、
-    # 检查就绪并认领结算（认领有对象身份保护，不会重复结算）
-    if not record_gesture(duel, duel.opponent_id, gesture):
-        return
-    await fire_duel_event(
-        make_duel_event(
-            duel, DuelEventKind.GESTURE, actor_id=duel.opponent_id, gesture=gesture
-        )
-    )
+    duel.bot_rps_active = True
+    try:
+        while not completed_gestures(duel, duel.opponent_id):
+            if not any(item is duel for item in duels):
+                # 决斗已被移除（取消或超时），停止发送
+                return
+            message_id = await send_rps(bot, duel.group_id)
+            if message_id is None:
+                return
+            gesture = await fetch_rps_result(bot, message_id)
+            if gesture is None:
+                logger.warning(
+                    f"未能获取机器人猜拳表情（消息 {message_id}）的结果，本次未记录手势"
+                )
+                return
+            # 记录手势（同步段，避免并发事件重复记录），随后发布事件；
+            # 记录失败（决斗已被移除）时停止发送
+            if not record_gesture(duel, duel.opponent_id, gesture):
+                return
+            await fire_duel_event(
+                make_duel_event(
+                    duel,
+                    DuelEventKind.GESTURE,
+                    actor_id=duel.opponent_id,
+                    gesture=gesture,
+                )
+            )
+    finally:
+        duel.bot_rps_active = False
     if not duel_ready(duel):
         return
     if not remove_duel(duel):

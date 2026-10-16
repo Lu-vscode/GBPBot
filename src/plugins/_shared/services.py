@@ -90,6 +90,31 @@ class DuelScoreService(Protocol):
         ...
 
 
+ScoreInterceptor = Callable[[int, int, str, int], int]
+"""分数改变拦截器：接收 (群号, 成员 QQ 号, 显示名, 待生效的变化量)，
+返回实际生效的变化量（返回 0 表示本次改变被抵消、分数不变）。"""
+
+
+@runtime_checkable
+class DuelScoreInterceptService(Protocol):
+    """决斗分数拦截服务（由猜拳决斗插件提供）。"""
+
+    def add_interceptor(self, interceptor: ScoreInterceptor) -> None:
+        """注册分数改变拦截器（同一拦截器重复注册会被忽略）。
+
+        拦截器在分数写入前的同步段内按注册顺序依次调用：每个拦截器
+        接收上一个拦截器改写后的变化量，返回自己改写后的结果（返回
+        0 表示本次改变被抵消、分数不变）；全部决斗分数写入（决斗
+        结算、道具效果等）都会经过该拦截点。拦截器应保持快捷；单个
+        拦截器抛出的异常只记录错误日志、本次改写不生效，不影响分数
+        写入与其它拦截器。
+
+        参数:
+            interceptor: 分数改变拦截器。
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class DuelSnapshot:
     """一场进行中决斗的只读快照（由 DuelStateService 提供）。"""
@@ -116,7 +141,7 @@ class DuelSnapshot:
     """对方是否已接受。"""
 
     gesture_users: frozenset[int]
-    """已发送猜拳表情的成员 QQ 号集合。"""
+    """已完成出手（发送了全部所需的猜拳表情）的成员 QQ 号集合。"""
 
     remaining_seconds: float
     """距超时结束的剩余秒数（不小于 0）。"""
@@ -147,12 +172,13 @@ class DuelEventKind(StrEnum):
     """对方拒绝决斗后触发（含机器人掷骰拒绝）。"""
 
     GESTURE = "gesture"
-    """记录任一方猜拳手势后触发。"""
+    """记录任一方一个猜拳手势后触发（需要多个手势的决斗每记录一个
+    发布一次）。"""
 
     SETTLING = "settling"
     """判定完成、结算分数前触发；处理器可修改点数与胜负、读取双方手势
-    （challenger_gesture/opponent_gesture）、设置默认结算消息前缀
-    （result_prefix，结算被接管时不使用）。"""
+    （challenger_gestures/opponent_gestures，按发送顺序）、设置默认结算
+    消息前缀（result_prefix，结算被接管时不使用）。"""
 
     SETTLED = "settled"
     """分数结算与结果播报完成后触发；结算被处理器接管时在接管处理器
@@ -200,12 +226,12 @@ class DuelEvent:
     gesture: int | None = None
     """gesture 事件的手势值（1 布、2 剪刀、3 石头）。"""
 
-    challenger_gesture: int | None = None
-    """settling 事件的挑战者手势（1 布、2 剪刀、3 石头）；双方出拳后的
-    结算前触发，此时两人手势必然已记录。"""
+    challenger_gestures: tuple[int, ...] = ()
+    """settling 事件的挑战者手势（1 布、2 剪刀、3 石头），按发送顺序；
+    双方出拳后的结算前触发，此时两人全部所需手势必然已记录。"""
 
-    opponent_gesture: int | None = None
-    """settling 事件的接受方手势（1 布、2 剪刀、3 石头）。"""
+    opponent_gestures: tuple[int, ...] = ()
+    """settling 事件的接受方手势（1 布、2 剪刀、3 石头），按发送顺序。"""
 
     block_reason: str | None = None
     """challenge 事件中由处理器设置的非空文案表示取消本次发起。"""
@@ -257,6 +283,31 @@ class DuelEventService(Protocol):
         ...
 
 
+DuelGestureQuotaProvider = Callable[[int, int, int], int]
+"""决斗手势配额提供者：接收 (群号, 成员 QQ 号, 对手 QQ 号)，返回该成员
+在该场决斗中需要发送的猜拳表情数量（正整数）。"""
+
+
+@runtime_checkable
+class DuelGestureQuotaService(Protocol):
+    """决斗手势配额服务（由猜拳决斗插件提供）。"""
+
+    def add_quota_provider(self, provider: DuelGestureQuotaProvider) -> None:
+        """注册手势配额提供者（同一提供者重复注册会被忽略）。
+
+        提供者用于决定一场决斗中成员需要发送几个猜拳表情（如道具
+        效果要求发送多个表情聚合胜负）：默认所有成员需要 1 个，注册
+        提供者后按提供者返回的数量提高（多个提供者取最大值，至少为
+        1）。所需数量在记录手势、就绪判定与机器人代发时动态计算；
+        返回非正整数的提供者会被忽略并记录警告，单个提供者抛出的异常
+        只记录日志、其结果被忽略；提供者应保持快捷。
+
+        参数:
+            provider: 手势配额提供者。
+        """
+        ...
+
+
 @runtime_checkable
 class DuelBotAcceptService(Protocol):
     """机器人接受决斗概率函数服务（由猜拳决斗插件提供）。"""
@@ -303,11 +354,13 @@ class DuelProvokeService(Protocol):
     async def send_provoked_gesture(
         self, bot: "Bot", group_id: int, challenger_id: int, opponent_id: int
     ) -> None:
-        """由机器人代替被挑衅决斗的对方发送猜拳表情并记录为对方的手势。
+        """由机器人代替被挑衅决斗的对方发送全部所需猜拳表情并记录
+        为对方的手势。
 
         应在 accept_by_provoke 成功、挑衅提示消息发送后调用：机器人
-        发送猜拳表情并将实际结果记录为对方的手势（胜负结算影响对方的
-        分数，不影响机器人）；该决斗已不在进行中时不做任何事。
+        逐条发送猜拳表情并将实际结果记录为对方的手势（所需数量由
+        决斗中的手势配额决定，胜负结算影响对方的分数，不影响机器人）；
+        该决斗已不在进行中时停止发送、不做任何事。
 
         参数:
             bot: 发送猜拳表情的机器人实例。

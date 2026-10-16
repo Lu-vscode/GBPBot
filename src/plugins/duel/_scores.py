@@ -8,7 +8,10 @@
 
 本模块同时实现对外提供的决斗分数服务（DuelScoreService）：其它插件
 经服务注册中心调用它增减分数、查询分数与高/低分榜第一名；服务实例
-score_service 由插件主模块统一注册。
+score_service 由插件主模块统一注册。分数写入前会先经分数改变拦截器
+链改写实际生效的变化量（决斗分数拦截服务 DuelScoreInterceptService，
+供道具等插件抵消分数改变）；服务实例 intercept_service 由插件主模块
+统一注册。
 """
 
 import json
@@ -18,7 +21,11 @@ from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_file
 
 from src.plugins._shared.onebot import truncate_name
-from src.plugins._shared.services import DuelScoreService
+from src.plugins._shared.services import (
+    DuelScoreInterceptService,
+    DuelScoreService,
+    ScoreInterceptor,
+)
 from src.plugins.duel._config import NICKNAME_MAX_LENGTH
 
 # 分数数据存储文件（localstore 插件数据目录）
@@ -113,9 +120,46 @@ if _scores:
     _member_count = sum(len(members) for members in _scores.values())
     logger.info(f"已加载决斗分数数据，共 {len(_scores)} 个群、{_member_count} 名成员")
 
+# 分数改变拦截器链：由 _DuelScoreInterceptService 维护，update_score 在
+# 写入前依次应用（每个拦截器接收上一步的结果并返回改写后的变化量）
+_interceptors: list[ScoreInterceptor] = []
+_INTERCEPTOR_ERRORS = (Exception,)
+
+
+class _DuelScoreInterceptService(DuelScoreInterceptService):
+    """决斗分数拦截服务的实现：管理分数改变拦截器链。"""
+
+    def add_interceptor(self, interceptor: ScoreInterceptor) -> None:
+        """注册分数改变拦截器（同一拦截器重复注册会被忽略）。"""
+        if interceptor not in _interceptors:
+            _interceptors.append(interceptor)
+
+
+# 拦截服务实例（由插件主模块统一注册）
+intercept_service = _DuelScoreInterceptService()
+
+
+def _apply_interceptors(group_id: int, user_id: int, name: str, delta: int) -> int:
+    """应用拦截器链：依次改写实际生效的变化量。
+
+    单个拦截器抛出的异常只记录错误日志，本次改写不生效（沿用上一步
+    的结果），不影响分数写入与其它拦截器。
+    """
+    for interceptor in tuple(_interceptors):
+        try:
+            delta = interceptor(group_id, user_id, name, delta)
+        except _INTERCEPTOR_ERRORS as exc:
+            logger.error(f"分数改变拦截器处理时出错：{exc}")
+    return delta
+
 
 def update_score(group_id: int, user_id: int, name: str, delta: int) -> None:
-    """更新指定群内成员的分数与昵称（昵称按显示规范截断）并写入本地文件。"""
+    """更新指定群内成员的分数与昵称（昵称按显示规范截断）并写入本地文件。
+
+    写入前先经拦截器链改写实际生效的变化量（如「无懈可击」把一次
+    改变改为 0 完成抵消）。
+    """
+    delta = _apply_interceptors(group_id, user_id, name, delta)
     group = _scores.setdefault(group_id, {})
     record = group.setdefault(user_id, {"name": name, "score": 0})
     record["name"] = truncate_name(name, NICKNAME_MAX_LENGTH)
