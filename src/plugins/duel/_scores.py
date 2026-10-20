@@ -185,6 +185,15 @@ def rank_entries(group_id: int, *, positive: bool) -> list[tuple[int, str, int]]
     return entries
 
 
+def total_score(group_id: int) -> int:
+    """返回指定群全部成员决斗分数的总和（无分数记录时为 0）。
+
+    没有分数记录的成员视为 0 分，因此有记录成员的分数之和即为本群
+    全部群成员的分数总和。
+    """
+    return sum(int(record["score"]) for record in _scores.get(group_id, {}).values())
+
+
 class _DuelScoreService(DuelScoreService):
     """决斗分数服务的实现：其它插件经服务注册中心调用它增减分数。"""
 

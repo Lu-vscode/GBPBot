@@ -12,8 +12,9 @@ _shared/services.py）供其它插件增减分数与查询高/低分榜第一名
 提供决斗分数拦截服务（DuelScoreInterceptService：供道具等插件在
 分数改变生效前拦截并改写变化量）；
 `/duel.rank` 可查看本群分数排行榜（以合并转发发送），`/duel.score`
-可查看自己在本群的决斗分数，`/duel.status` 可查看自己在本群的决斗
-状态。除分数服务外，还对外提供决斗状态服务
+可查看自己在本群的决斗分数（超级用户可附加 sum/s 参数查看本群全部
+群成员的分数总和，未在用户手册中提及），`/duel.status` 可查看自己
+在本群的决斗状态。除分数服务外，还对外提供决斗状态服务
 （DuelStateService）、决斗事件服务（DuelEventService：在发起、接受、
 拒绝、出拳、结算、超时、取消等环节发布事件，供道具等插件联动，
 settling 事件的处理器可接管结算），机器人接受概率函数服务
@@ -91,6 +92,7 @@ from src.plugins.duel._config import (
     RANK_NODE_NAME,
     RANK_TITLE_HIGH,
     RANK_TITLE_LOW,
+    SCORE_SUM_DENIED,
     STATUS_ALL_DENIED,
     USAGE_ACCEPT,
     USAGE_DUEL,
@@ -114,7 +116,12 @@ from src.plugins.duel._messages import (
     send_forward,
     send_text,
 )
-from src.plugins.duel._scores import intercept_service, rank_entries, score_service
+from src.plugins.duel._scores import (
+    intercept_service,
+    rank_entries,
+    score_service,
+    total_score,
+)
 from src.plugins.duel._services import (
     bot_accept_service,
     cancel_service,
@@ -602,6 +609,18 @@ async def handle_duel_rank(
     )
 
 
+def _parse_score_args(tokens: list[str]) -> str | None:
+    """解析 /duel.score 命令参数，返回 "self"、"sum" 或 None（无法识别）。
+
+    sum 参数仅超级用户可用，未在用户手册中提及。
+    """
+    if not tokens:
+        return "self"
+    if len(tokens) == 1 and tokens[0] in {"sum", "s"}:
+        return "sum"
+    return None
+
+
 duel_score_cmd = on_command("duel.score", rule=is_type(GroupMessageEvent))
 
 
@@ -609,9 +628,24 @@ duel_score_cmd = on_command("duel.score", rule=is_type(GroupMessageEvent))
 async def handle_duel_score(
     bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
 ) -> None:
-    """处理 /duel.score 命令：查看自己在本群的决斗分数（无记录时为 0）。"""
-    if args.extract_plain_text().split():
+    """处理 /duel.score 命令：查看自己（或超级用户查看本群全部成员）的决斗分数。"""
+    scope = _parse_score_args(args.extract_plain_text().lower().split())
+    if scope is None:
         await send_text(bot, event.group_id, USAGE_SCORE, reply_to=event.message_id)
+        return
+    if scope == "sum":
+        if not await SUPERUSER(bot, event):
+            await send_text(
+                bot, event.group_id, SCORE_SUM_DENIED, reply_to=event.message_id
+            )
+            return
+        total = total_score(event.group_id)
+        await send_text(
+            bot,
+            event.group_id,
+            f"本群全部群成员的决斗分数总和为 {total} 分。",
+            reply_to=event.message_id,
+        )
         return
     score = score_service.get_score(event.group_id, event.user_id)
     name = _sender_display_name(event)

@@ -6,6 +6,8 @@
 - 发送节流（Bot.call_api 钩子）：拦截所有发送类接口，为每次发送排定发送时间，
   保证任意两条消息的间隔不小于每秒限额、滑动 60 秒与 3600 秒窗口内的普通消息
   条数分别不超过每分钟与每小时限额；超出限额的发送会排队等待空位，而不是被丢弃。
+  忙碌提示不计入两个窗口，只与相邻发送保持最小间隔，不会排在尚未到点的普通
+  消息之后（限额用尽时普通消息可能被排到近一小时之后）。
 - 事件阻断（rate_limit_gate）：每分钟或每小时限额用尽后，以项目最小优先级拦截
   消息事件并停止事件传播，使所有会发送消息的插件（实名群提醒、命令等）停止运行。
   此时仅当消息指向机器人时才回复忙碌提示：群聊 @机器人 或以命令前缀
@@ -169,6 +171,7 @@ class _ScheduledSend(NamedTuple):
 
 # 发送排定表：按排定时间升序记录最长窗口（1 小时）内已发出与排队中的全部
 # 发送，移出窗口的条目会被清理。所有发送（含忙碌提示）都经它排定，保证间隔。
+# 忙碌提示可能插入到已排队但尚未到点的普通消息之前，插入后仍保持升序。
 _send_schedule: deque[_ScheduledSend] = deque()
 
 # 发送排定与登记的互斥锁：保证并发发送的间隔计算与限额判断不互相干扰
@@ -179,7 +182,8 @@ _send_lock = asyncio.Lock()
 _busy_last_sent: dict[str, float] = {}
 
 # 标记"当前上下文正在发送忙碌提示"：忙碌提示不计入发送限额，不受每分钟与
-# 每小时限额阻塞（但仍遵守发送间隔）
+# 每小时限额阻塞（但仍遵守与相邻发送的最小间隔，且不会排在尚未到点的普通
+# 消息之后）
 _sending_busy: ContextVar[bool] = ContextVar("rate_limit_sending_busy", default=False)
 
 # OneBot v11 中会发出消息的 API；其他接口（如贴表情、上传文件）不受频率限制。
@@ -215,21 +219,59 @@ def _committed_within(reference: float, window: float) -> list[_ScheduledSend]:
     ]
 
 
+def _latest_due_at(now: float) -> float | None:
+    """返回排定表中不晚于 now 的最晚一条发送的排定时间，没有则返回 None。"""
+    for entry in reversed(_send_schedule):
+        if entry.at <= now:
+            return entry.at
+    return None
+
+
+def _insert_scheduled(at: float, *, is_busy: bool) -> None:
+    """按排定时间升序把一次发送登记到排定表。
+
+    普通消息总排在全部队尾之后，追加即可；忙碌提示可能插入到已排队但尚未
+    到点的普通消息之前，需要找到正确位置，窗口统计与过期清理依赖升序。
+    """
+    entry = _ScheduledSend(at=at, is_busy=is_busy)
+    index = len(_send_schedule)
+    while index > 0 and _send_schedule[index - 1].at > at:
+        index -= 1
+    _send_schedule.insert(index, entry)
+
+
 def _reserve_send_time(now: float, *, is_busy: bool) -> float:
     """为一次发送排定时间并登记，返回排定的 monotonic 发送时间。
 
-    需在 `_send_lock` 内调用。排定时间满足三个约束：与上一条发送的间隔不小
-    于每秒限额换算的最小间隔；普通消息（非忙碌提示）排定后的滑动 60 秒与
-    3600 秒窗口内条数分别不超过每分钟与每小时限额。不满足时按"排队等待"
-    向后顺延，而不是丢弃。
+    需在 `_send_lock` 内调用。普通消息的排定时间满足三个约束：与上一条发送
+    的间隔不小于每秒限额换算的最小间隔；排定后的滑动 60 秒与 3600 秒窗口内
+    条数分别不超过每分钟与每小时限额。不满足时按"排队等待"向后顺延，而不是
+    丢弃。
+
+    忙碌提示不计入两个窗口，只与已到发送时间的发送及相邻条目保持最小间隔，
+    不排在尚未到点的普通消息之后：限额用尽时普通消息可能被排到近一小时之后，
+    若忙碌提示也追加到队尾，就会被一并拖后而失去提示意义。
     """
     _purge_expired(now)
+    if is_busy:
+        scheduled = now
+        latest_due_at = _latest_due_at(now)
+        if latest_due_at is not None:
+            scheduled = max(scheduled, latest_due_at + _min_interval)
+        # 与尚未到点的相邻发送保持最小间隔，冲突时顺延到该条之后再检查
+        for entry in _send_schedule:
+            if entry.at < scheduled:
+                continue
+            if entry.at - scheduled >= _min_interval:
+                break
+            scheduled = entry.at + _min_interval
+        _insert_scheduled(scheduled, is_busy=True)
+        return scheduled
+
     scheduled = now
     while True:
         if _send_schedule:
             scheduled = max(scheduled, _send_schedule[-1].at + _min_interval)
-        if is_busy:
-            break
         minute_committed = _committed_within(scheduled, _MINUTE_SECONDS)
         if len(minute_committed) >= _max_per_minute:
             # 每分钟窗口已满：顺延到窗口内最早一条普通消息移出窗口后重查
@@ -241,7 +283,7 @@ def _reserve_send_time(now: float, *, is_busy: bool) -> float:
             scheduled = hour_committed[0].at + _HOUR_SECONDS
             continue
         break
-    _send_schedule.append(_ScheduledSend(at=scheduled, is_busy=is_busy))
+    _insert_scheduled(scheduled, is_busy=False)
     return scheduled
 
 
