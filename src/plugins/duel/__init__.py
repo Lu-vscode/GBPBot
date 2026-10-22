@@ -57,7 +57,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot.rule import is_type
 from nonebot_plugin_apscheduler import scheduler
 
-from src.plugins._shared.config import get_bot_list
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
 from src.plugins._shared.onebot import (
     member_display_name,
     sender_display_name,
@@ -74,6 +74,7 @@ from src.plugins._shared.services import (
     DuelProvokeService,
     DuelScoreInterceptService,
     DuelScoreService,
+    DuelSettleService,
     DuelStateService,
     register_service,
 )
@@ -84,7 +85,6 @@ from src.plugins.duel._config import (
     HOURLY_LIMIT,
     LIMIT_REACHED,
     MAX_MULTIPLIER,
-    NICKNAME_MAX_LENGTH,
     PAIR_ACTIVE,
     PROVOKED_ALREADY_STARTED,
     PROVOKED_CANNOT_REJECT,
@@ -102,7 +102,12 @@ from src.plugins.duel._config import (
     USAGE_STATUS,
     text,
 )
-from src.plugins.duel._events import event_service, fire_duel_event, make_duel_event
+from src.plugins.duel._events import (
+    event_service,
+    fire_duel_event,
+    make_duel_event,
+    settle_service,
+)
 from src.plugins.duel._flow import resolve_duel, send_bot_rps
 from src.plugins.duel._gestures import extract_gesture, is_rps_message
 from src.plugins.duel._limit import (
@@ -175,6 +180,7 @@ register_service(DuelScoreService, score_service)
 register_service(DuelScoreInterceptService, intercept_service)
 register_service(DuelStateService, state_service)
 register_service(DuelEventService, event_service)
+register_service(DuelSettleService, settle_service)
 register_service(DuelBotAcceptService, bot_accept_service)
 register_service(DuelProvokeService, provoke_service)
 register_service(DuelMultiplierService, multiplier_service)

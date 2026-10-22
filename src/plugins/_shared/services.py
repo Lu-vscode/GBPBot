@@ -20,7 +20,7 @@ NoneBot 的插件之间不应互相导入模块（提前导入会导致插件无
    src.plugins.xxx，与运行时命名一致）。
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -50,6 +50,21 @@ class DuelScoreService(Protocol):
         参数:
             group_id: 群号。
             user_id: 成员 QQ 号。
+        """
+        ...
+
+    def add_scores(
+        self, group_id: int, entries: Sequence[tuple[int, str, int]]
+    ) -> None:
+        """批量更新多名成员的决斗分数并只写入一次本地存储。
+
+        语义等价于按顺序逐个调用 add_score，但只落盘一次；各成员的
+        变化量仍会依次经过分数改变拦截器链。用于「五谷丰登」等一次
+        影响全群成员的道具效果。
+
+        参数:
+            group_id: 群号。
+            entries: (成员 QQ 号, 显示名, 分数变化量) 序列。
         """
         ...
 
@@ -280,6 +295,36 @@ class DuelEventService(Protocol):
 
     def unsubscribe(self, handler: DuelEventHandler) -> None:
         """注销事件处理器（未注册时不做任何事）。"""
+        ...
+
+
+SettleHandler = Callable[[DuelEvent], Awaitable[bool] | bool]
+"""结算接管者：在 settling 事件的全部处理器完成后按注册优先级调用。
+
+返回 True 表示已接管本场结算并完成分数改变与播报，决斗跳过默认的
+分数结算与结果播报；返回 False 表示本场不接管，且不应产生任何副作用。
+接管者在改变分数后必须返回 True（播报失败只记录日志即可），避免同一场
+结算被执行两次；接管者只读取事件中的最终胜负，不应再改写它。"""
+
+
+@runtime_checkable
+class DuelSettleService(Protocol):
+    """决斗结算接管服务（由猜拳决斗插件提供）。"""
+
+    def register_settler(self, priority: int, handler: SettleHandler) -> None:
+        """注册结算接管者（同一处理器重复注册会被忽略）。
+
+        决斗判定完成、settling 事件的全部处理器执行完毕后，按优先级
+        从高到低依次询问接管者：第一个返回 True 的接管本场结算，其余
+        接管者不再被调用；全部返回 False 时按默认逻辑结算。同优先级
+        的接管者按注册顺序询问。接管者抛出的异常按已接管处理（记录
+        错误日志），避免已产生的分数改变与默认结算或其它接管者叠加。
+
+        参数:
+            priority: 接管优先级，数值越大越优先（建议使用道具品质值；
+                同品质道具的冲突由道具自行约定具体数值）。
+            handler: 结算接管者。
+        """
         ...
 
 

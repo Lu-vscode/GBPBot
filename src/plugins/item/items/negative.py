@@ -11,6 +11,7 @@
 
 import random
 
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import member_display_name
 from src.plugins.item._framework import (
     ItemDefinition,
@@ -23,8 +24,8 @@ from src.plugins.item._framework import (
     register_item,
 )
 
-# 消息中群昵称的最大显示长度（字符数，与主模块保持一致）
-_NICKNAME_MAX_LENGTH = 12
+# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
+_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 涅槃的生效概率
 _NIRVANA_CHANCE = 0.8

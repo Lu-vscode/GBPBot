@@ -5,8 +5,10 @@
 与对方手势判定的聚合结果判定：至少一个手势胜则该方胜、否则至少
 一个手势平则平局、否则该方负（双方都需要多个手势时以发起方为
 聚合方、另一方取第一个手势）。结算流程发布 settling 事件（订阅方
-可改写点数与胜负、设置默认结算消息前缀，或接管结算），按最终点数
-更新双方分数并播报结果，随后发布 settled 事件；机器人代打（机器人
+可改写点数与胜负、设置默认结算消息前缀，或按旧机制设置 claimed
+接管），随后按优先级询问结算接管者（经 DuelSettleService 注册，
+第一个返回 True 的完成结算并跳过默认结算），否则按最终点数更新
+双方分数并播报结果，随后发布 settled 事件；机器人代打（机器人
 掷骰接受决斗后出手，或被挑衅时代替对方出手）循环发送猜拳表情并
 记录为对方手势直至满足所需数量，随后检查双方是否均已完成出手并
 认领结算。
@@ -17,7 +19,7 @@ from nonebot.adapters.onebot.v11 import Bot
 
 from src.plugins._shared.services import DuelEvent, DuelEventKind
 from src.plugins.duel._config import text
-from src.plugins.duel._events import fire_duel_event, make_duel_event
+from src.plugins.duel._events import fire_duel_event, make_duel_event, run_settlers
 from src.plugins.duel._gestures import WINNING_GESTURES
 from src.plugins.duel._messages import fetch_rps_result, send_rps, send_text
 from src.plugins.duel._scores import update_score
@@ -121,9 +123,11 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
     调用前该决斗必须已从决斗列表中认领移除，保证只结算一次；
     结算前发布 settling 事件（处理器可改写点数与胜负、读取双方手势，并可
     设置前缀文本在默认结算消息前拼接；点数负数按 0 处理、非法改写回退原
-    判定；处理器可设置 claimed 接管本次结算，此时跳过默认的分数结算与
-    结果播报、也不使用前缀，由处理器自行完成），结算与播报后发布 settled
-    事件（接管结算时在接管处理器完成结算后发布）。
+    判定），随后把胜负校正为最终合法判定并按优先级询问结算接管者（经
+    DuelSettleService 注册，第一个返回 True 的接管本场结算；接管与直接在
+    settling 事件中设置 claimed 的效果相同：跳过默认的分数结算与结果播报、
+    也不使用前缀，由接管者自行完成），结算与播报后发布 settled 事件
+    （接管结算时在接管者完成结算后发布）。
     """
     result = _decide_winner(duel)
     event = make_duel_event(
@@ -136,6 +140,13 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
     )
     await fire_duel_event(event)
     final = _final_result(duel, result, event)
+    if not event.claimed:
+        # 把改写后的胜负校正为最终合法判定，供结算接管者读取；无接管者
+        # 返回 True 时继续按默认逻辑结算
+        event.winner_id = final[0] if final is not None else None
+        event.loser_id = final[2] if final is not None else None
+        if await run_settlers(event):
+            event.claimed = True
     if event.claimed:
         logger.info(
             f"群 {duel.group_id} 中 {duel.challenger_id} 与 {duel.opponent_id} "

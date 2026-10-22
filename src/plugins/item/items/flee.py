@@ -18,17 +18,16 @@ from src.plugins._shared.services import (
 )
 from src.plugins.item._framework import (
     ItemDefinition,
-    ItemState,
     ItemType,
     ItemUseContext,
     Quality,
     add_item,
-    add_state,
-    get_item_count,
-    get_state,
     register_item,
-    remove_item,
-    remove_state,
+)
+from src.plugins.item.items._durability import (
+    consume,
+    detail_durability,
+    transferable_count,
 )
 
 # 道具编号、耐久参数与状态键
@@ -66,59 +65,19 @@ def _can_use(context: ItemUseContext) -> str | None:
     return None
 
 
-def _durability_instances(group_id: int, user_id: int) -> list[int]:
-    """返回成员身上处于耗损中的「逃之夭夭」副本的剩余耐久列表。
-
-    全新（未使用过）的副本不在列表中；列表中的每一项为某个副本扣除
-    使用次数后的剩余耐久（1~2），按开始耗损的先后排列。
-    """
-    state = get_state(group_id, user_id, _DURABILITY_STATE_KEY)
-    if state is None:
-        return []
-    raw = state.data.get("remaining")
-    if not isinstance(raw, list):
-        return []
-    return [
-        value
-        for value in raw
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
-    ]
-
-
-def _store_durability_instances(
-    group_id: int, user_id: int, instances: list[int]
-) -> None:
-    """保存耗损中的副本耐久列表；列表为空时移除状态。"""
-    if instances:
-        add_state(
-            group_id,
-            user_id,
-            state=ItemState(
-                key=_DURABILITY_STATE_KEY,
-                item_id=_ITEM_ID,
-                data={"remaining": [int(value) for value in instances]},
-            ),
-        )
-        return
-    remove_state(group_id, user_id, _DURABILITY_STATE_KEY)
-
-
 def _transferable_count(group_id: int, user_id: int) -> int:
     """返回可用于交换/合成的「逃之夭夭」数量（全新副本，耗损副本不计入）。"""
-    return max(
-        0,
-        get_item_count(group_id, user_id, _ITEM_ID)
-        - len(_durability_instances(group_id, user_id)),
+    return transferable_count(
+        group_id, user_id, item_id=_ITEM_ID, state_key=_DURABILITY_STATE_KEY
     )
 
 
 def _detail_durability(group_id: int, user_id: int) -> str:
     """详情显示的耐久：存在耗损副本时显示第一个（最早开始耗损）副本的
     剩余耐久，否则显示满耐久。"""
-    instances = _durability_instances(group_id, user_id)
-    if instances:
-        return f"{instances[0]}/{_DURABILITY_TOTAL}"
-    return f"{_DURABILITY_TOTAL}/{_DURABILITY_TOTAL}"
+    return detail_durability(
+        group_id, user_id, state_key=_DURABILITY_STATE_KEY, total=_DURABILITY_TOTAL
+    )
 
 
 def _handle_consume(context: ItemUseContext) -> bool:
@@ -126,26 +85,7 @@ def _handle_consume(context: ItemUseContext) -> bool:
     消失），没有耗损副本时开始耗损一件全新副本（库存数量不变，耐久
     记录进入状态）。返回是否成功消耗。
     """
-    instances = _durability_instances(context.group_id, context.user_id)
-    if instances:
-        instances[0] -= 1
-        if instances[0] <= 0:
-            # 该副本耐久归零：道具消失（从库存移除，状态随列表清空清理）
-            instances.pop(0)
-            if not remove_item(context.group_id, context.user_id, _ITEM_ID):
-                logger.error(
-                    f"逃之夭夭：耐久归零的副本未能从库存移除"
-                    f"（群 {context.group_id}，成员 {context.user_id}）"
-                )
-        _store_durability_instances(context.group_id, context.user_id, instances)
-        return True
-    if get_item_count(context.group_id, context.user_id, _ITEM_ID) < 1:
-        # 不可达：主模块已在同步段校验持有道具
-        return False
-    _store_durability_instances(
-        context.group_id, context.user_id, [_DURABILITY_TOTAL - 1]
-    )
-    return True
+    return consume(context, state_key=_DURABILITY_STATE_KEY, total=_DURABILITY_TOTAL)
 
 
 def _target_name(snapshot: DuelSnapshot, user_id: int) -> str:

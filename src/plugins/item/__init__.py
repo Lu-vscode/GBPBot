@@ -26,7 +26,7 @@ from nonebot.rule import is_type
 from nonebot_plugin_apscheduler import scheduler
 from pydantic import BaseModel
 
-from src.plugins._shared.config import get_bot_list
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
 from src.plugins._shared.onebot import (
     member_display_name,
     send_group_forward,
@@ -42,9 +42,13 @@ from src.plugins.item._framework import (
     ItemDefinition,
     ItemUseContext,
     Quality,
+    acquire_curse,
     add_item,
+    add_items,
+    detail_text,
     draw_item_of_quality,
     draw_random_item,
+    exchange_items,
     get_item,
     get_item_count,
     is_item_id,
@@ -52,7 +56,8 @@ from src.plugins.item._framework import (
     list_user_items,
     purge_expired_states,
     quality_label,
-    remove_item,
+    remove_items,
+    run_item_use,
     set_draw_weights,
 )
 
@@ -72,8 +77,8 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
 )
 
-# 道具消息中群昵称的最大显示长度（字符数）
-_NICKNAME_MAX_LENGTH = 12
+# 道具消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
+_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 合成与交换指令需要提供的道具编号数量
 _ITEM_ARG_COUNT = 2
@@ -297,31 +302,6 @@ async def _send_text(
     await send_group_text(bot, group_id, text, reply_to, label="道具消息")
 
 
-def _detail_text(definition: ItemDefinition, group_id: int, user_id: int) -> str:
-    """生成道具的完整信息文本（用于详情与黑色诅咒获得消息）。
-
-    耐久条目默认使用定义中的静态文本；道具模块提供 detail_durability
-    钩子时改用其动态结果（按查看者状态计算）。
-    """
-    durability = definition.durability
-    if definition.detail_durability is not None:
-        durability = definition.detail_durability(group_id, user_id)
-    lines = [
-        f"编号：{definition.item_id}",
-        f"名称：{definition.name}",
-        f"品质：{quality_label(definition.quality)}",
-        f"类型：{'、'.join(item_type.value for item_type in definition.types)}",
-        f"介绍：{definition.description}",
-        f"功能：{definition.effect}",
-        f"使用条件：{definition.condition}",
-        f"使用时机：{definition.timing}",
-        f"耐久：{durability}",
-    ]
-    if definition.note:
-        lines.append(f"备注：{definition.note}")
-    return "\n".join(lines)
-
-
 def _item_label(item_id: str) -> str:
     """返回道具的显示名（"<编号> <名称>"）；编号未注册时回退为编号本身。"""
     definition = get_item(item_id)
@@ -342,72 +322,22 @@ def _transferable_count(group_id: int, user_id: int, item_id: str) -> int:
     return get_item_count(group_id, user_id, item_id)
 
 
-def _parse_target(args: Message) -> int | None:
-    """从命令参数中解析被 @ 的成员 QQ 号，无有效 @ 段时返回 None。"""
+def _parse_targets(args: Message) -> tuple[int, ...]:
+    """从命令参数中解析全部被 @ 的成员 QQ 号（按出现顺序）。"""
+    targets: list[int] = []
     for segment in args:
         if segment.type != "at":
             continue
         qq = str(segment.data.get("qq", ""))
         if qq.isdigit():
-            return int(qq)
-    return None
+            targets.append(int(qq))
+    return tuple(targets)
 
 
-async def _run_item_use(context: ItemUseContext, *, consume: bool) -> None:
-    """执行一次道具使用：使用条件校验（未通过时不消耗也不执行效果）、
-    可选地消耗道具（默认为消耗一件库存，道具模块可自定义消耗方式）、
-    调用道具模块的使用效果。"""
-    if context.item.can_use is not None:
-        error = context.item.can_use(context)
-        if error:
-            await context.send(error)
-            return
-    if consume:
-        consumed = (
-            context.item.handle_consume(context)
-            if context.item.handle_consume is not None
-            else remove_item(context.group_id, context.user_id, context.item.item_id)
-        )
-        if not consumed:
-            # 不可达：校验与消耗同处同步段，道具状态不会在期间改变
-            logger.error(
-                f"道具 {context.item.label} 消耗失败（群 {context.group_id}，"
-                f"成员 {context.user_id}）：库存或状态不一致"
-            )
-            await context.send("道具使用失败：道具状态异常，本次未消耗。")
-            return
-    if context.item.handle_use is not None:
-        await context.item.handle_use(context)
-
-
-async def _auto_use_black_curse(
-    bot: Bot,
-    group_id: int,
-    user_id: int,
-    user_name: str,
-    definition: ItemDefinition,
-) -> None:
-    """黑色诅咒获得的自动流程：先以合并转发发送完整信息，再转交道具模块自动使用。"""
-    await send_group_forward(
-        bot,
-        group_id,
-        [
-            f"你获得了黑色诅咒道具：{definition.label}！\n"
-            f"{_detail_text(definition, group_id, user_id)}"
-        ],
-        node_name="道具详情",
-        label="诅咒道具信息",
-    )
-    context = ItemUseContext(
-        bot=bot,
-        group_id=group_id,
-        user_id=user_id,
-        user_name=user_name,
-        item=definition,
-        args=(),
-        reply_to=None,
-    )
-    await _run_item_use(context, consume=False)
+def _parse_target(args: Message) -> int | None:
+    """从命令参数中解析被 @ 的成员 QQ 号，无有效 @ 段时返回 None。"""
+    targets = _parse_targets(args)
+    return targets[0] if targets else None
 
 
 class _ItemService(ItemService):
@@ -444,7 +374,7 @@ class _ItemService(ItemService):
         definition = get_item(item.item_id)
         if definition is None or definition.quality != Quality.BLACK_CURSE:
             return
-        await _auto_use_black_curse(bot, group_id, user_id, name, definition)
+        await acquire_curse(bot, group_id, user_id, name, definition)
 
 
 # 将道具发放能力注册为跨插件服务（契约见 _shared/services.py），
@@ -535,6 +465,20 @@ def _remove_exchange(exchange: _PendingExchange) -> bool:
     return False
 
 
+def _shift_quality(quality: Quality, delta: int) -> Quality:
+    """按档位升降品质，并夹取到合法品质范围。
+
+    库存中出现黑色诅咒等异常数据时，品质运算不得越界（否则构造
+    Quality 会抛 ValueError）；夹取后仍保持原有合成语义（如灰色
+    “低一级”得到黑色诅咒）。
+    """
+    value = max(
+        Quality.BLACK_CURSE.value,
+        min(Quality.GOLD.value, quality.value + delta),
+    )
+    return Quality(value)
+
+
 def _draw_craft_results(quality: Quality) -> tuple[str, list[ItemDefinition]] | None:
     """抽取合成结果（结果文案前缀与获得的道具列表）；目标品质的道具池
     为空时返回 None。
@@ -546,10 +490,10 @@ def _draw_craft_results(quality: Quality) -> tuple[str, list[ItemDefinition]] | 
     roll = random.random()
     if roll < _craft_down:
         prefix = "合成失败"
-        target = Quality(quality - 1)
+        target = _shift_quality(quality, -1)
     elif roll < _craft_down + _craft_up:
         prefix = "合成成功"
-        target = Quality(quality + 1)
+        target = _shift_quality(quality, 1)
     elif quality is Quality.PURPLE:
         first = draw_item_of_quality(Quality.GOLD)
         second = draw_item_of_quality(Quality.GOLD)
@@ -558,7 +502,7 @@ def _draw_craft_results(quality: Quality) -> tuple[str, list[ItemDefinition]] | 
         return "合成大成功", [first, second]
     else:
         prefix = "合成大成功"
-        target = Quality(quality + 2)
+        target = _shift_quality(quality, 2)
     item = draw_item_of_quality(target)
     if item is None:
         return None
@@ -622,7 +566,7 @@ async def handle_item_detail(
     await send_group_forward(
         bot,
         event.group_id,
-        [_detail_text(definition, event.group_id, event.user_id)],
+        [detail_text(definition, event.group_id, event.user_id)],
         node_name="道具详情",
         label="道具详情",
     )
@@ -640,6 +584,8 @@ def _craft_error(
         return f"{first.label} 与 {second.label} 的品质不同，无法合成。"
     if first.quality is Quality.GOLD:
         return "金色传说道具无法合成。"
+    if first.quality is Quality.BLACK_CURSE:
+        return "黑色诅咒无法作为合成材料。"
     needed = 2 if first.item_id == second.item_id else 1
     if first.item_id == second.item_id:
         need_text = f"{first.label}×2"
@@ -699,11 +645,16 @@ async def handle_item_craft(
         )
         return
     prefix, results = drawn
-    remove_item(event.group_id, event.user_id, item_id_a)
-    remove_item(event.group_id, event.user_id, item_id_b)
-    for result in results:
-        if result.quality != Quality.BLACK_CURSE:
-            add_item(event.group_id, event.user_id, result.item_id)
+    remove_items(
+        event.group_id,
+        event.user_id,
+        [(item_id_a, 1), (item_id_b, 1)],
+    )
+    add_items(
+        event.group_id,
+        event.user_id,
+        [result.item_id for result in results if result.quality != Quality.BLACK_CURSE],
+    )
     result_labels = "、".join(result.label for result in results)
     await _send_text(
         bot,
@@ -714,9 +665,7 @@ async def handle_item_craft(
     user_name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
     for result in results:
         if result.quality is Quality.BLACK_CURSE:
-            await _auto_use_black_curse(
-                bot, event.group_id, event.user_id, user_name, result
-            )
+            await acquire_curse(bot, event.group_id, event.user_id, user_name, result)
 
 
 async def _start_exchange(
@@ -899,10 +848,13 @@ async def handle_item_exchange_accept(
             reply_to=event.message_id,
         )
         return
-    remove_item(event.group_id, exchange.initiator_id, exchange.initiator_item_id)
-    add_item(event.group_id, exchange.target_id, exchange.initiator_item_id)
-    remove_item(event.group_id, event.user_id, exchange.target_item_id)
-    add_item(event.group_id, exchange.initiator_id, exchange.target_item_id)
+    exchange_items(
+        event.group_id,
+        exchange.initiator_id,
+        exchange.initiator_item_id,
+        exchange.target_id,
+        exchange.target_item_id,
+    )
     _remove_exchange(exchange)
     await _send_text(
         bot,
@@ -985,6 +937,7 @@ async def handle_item_use(
         )
         return
     user_name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    targets = _parse_targets(args)
     context = ItemUseContext(
         bot=bot,
         group_id=event.group_id,
@@ -993,9 +946,10 @@ async def handle_item_use(
         item=definition,
         args=use_args,
         reply_to=event.message_id,
-        target_id=_parse_target(args),
+        target_id=targets[0] if targets else None,
+        target_ids=targets,
     )
-    await _run_item_use(context, consume=True)
+    await run_item_use(context)
 
 
 # /item.get 命令：仅测试群中的超级用户可用（条件不符时不作响应）

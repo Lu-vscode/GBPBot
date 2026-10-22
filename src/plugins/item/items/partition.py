@@ -12,7 +12,7 @@
 不发送任何提示消息（减少 Bot 不必要的主动消息），决斗功能随之恢复。
 """
 
-from src.plugins._shared.config import get_bot_list
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
 from src.plugins._shared.onebot import member_display_name, truncate_name
 from src.plugins._shared.services import (
     DuelEvent,
@@ -36,8 +36,8 @@ _ITEM_ID = "711"
 _STATE_KEY = f"{_ITEM_ID}.partition"
 _DURATION_SECONDS = 3600.0
 
-# 消息中群昵称的最大显示长度（字符数，与主模块保持一致）
-_NICKNAME_MAX_LENGTH = 12
+# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
+_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 用法与错误提示文案
 _USAGE = f"请 @ 一位群成员，用法：/item.use {_ITEM_ID} @群成员"

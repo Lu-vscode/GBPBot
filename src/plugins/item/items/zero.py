@@ -23,6 +23,7 @@ from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 from nonebot.rule import is_type
 
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, sender_display_name
 from src.plugins.item._framework import (
     ItemDefinition,
@@ -31,8 +32,9 @@ from src.plugins.item._framework import (
     ItemUseContext,
     Quality,
     add_state,
+    add_states,
     add_user_score,
-    get_item,
+    add_user_scores,
     get_rank_entries,
     get_state,
     get_user_score,
@@ -40,8 +42,9 @@ from src.plugins.item._framework import (
     list_states,
     list_user_items,
     register_item,
-    remove_item,
-    remove_state,
+    remove_items,
+    remove_states,
+    state_label,
 )
 
 # 道具编号、状态键与状态数据中的使用者昵称快照键
@@ -57,20 +60,11 @@ _REBIRTH_COOLDOWN_SECONDS = 604800.0
 # 使用 000 时随使用者一同归零的其它成员人数上限
 _OTHER_LIMIT = 10
 
-# 消息中群昵称的最大显示长度（字符数，与主模块保持一致）
-_NICKNAME_MAX_LENGTH = 12
+# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
+_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
-# 清空状态文案中的状态显示名：专用状态名优先，未列出的回退为
-# 产生该状态的道具名称，道具未注册时回退为状态键
-_STATE_LABELS = {
-    "314.ouroboros": "衔尾蛇",
-    "121.gesture": "石头",
-    "122.gesture": "剪刀",
-    "123.gesture": "布",
-    "124.gesture": "破平",
-    "curse.678": "区",
-    "404.not_found": "404",
-}
+# 清空状态文案中的状态显示名由产生状态的道具在 state_labels 中声明（见
+# _framework.state_label），未声明的回退为道具名称
 
 
 def _set_score(group_id: int, user_id: int, name: str, score: int) -> None:
@@ -81,15 +75,8 @@ def _set_score(group_id: int, user_id: int, name: str, score: int) -> None:
 
 
 def _state_label(state: ItemState) -> str:
-    """返回状态在文案中的显示名：优先专用状态名，其次产生状态的道具名，
-    道具未注册时回退为状态键。"""
-    label = _STATE_LABELS.get(state.key)
-    if label is not None:
-        return label
-    definition = get_item(state.item_id)
-    if definition is not None:
-        return definition.name
-    return state.key
+    """返回状态在文案中的显示名（见 _framework.state_label）。"""
+    return state_label(state)
 
 
 def _new_state(key: str, user_name: str) -> ItemState:
@@ -133,8 +120,7 @@ def _remove_former_holders(group_id: int, user_id: int) -> list[tuple[int, str]]
             name = str(state.data.get("user_name") or "").strip()
             former[holder_id] = name or f"QQ {holder_id}"
     for holder_id in former:
-        for key in _OWN_STATE_KEYS:
-            remove_state(group_id, holder_id, key)
+        remove_states(group_id, holder_id, list(_OWN_STATE_KEYS))
     return list(former.items())
 
 
@@ -150,11 +136,13 @@ async def _handle_use(context: ItemUseContext) -> None:
 
     # 同步段一：清空使用者的道具与全部有效状态，并快照文案信息
     lost_items = list_user_items(group_id, user_id)
-    for definition, count in lost_items:
-        remove_item(group_id, user_id, definition.item_id, count)
+    remove_items(
+        group_id,
+        user_id,
+        [(definition.item_id, count) for definition, count in lost_items],
+    )
     lost_states = list_states(group_id, user_id)
-    for state in lost_states:
-        remove_state(group_id, user_id, state.key)
+    remove_states(group_id, user_id, [state.key for state in lost_states])
     lost_state_labels = [
         _state_label(state) for state in lost_states if state.key not in _OWN_STATE_KEYS
     ]
@@ -163,19 +151,26 @@ async def _handle_use(context: ItemUseContext) -> None:
     former_holders = _remove_former_holders(group_id, user_id)
 
     # 同步段三：自己获得「归零」与「新生」（冷却记录为空，即时可用）
-    for key in _OWN_STATE_KEYS:
-        add_state(group_id, user_id, state=_new_state(key, user_name))
+    add_states(
+        group_id,
+        user_id,
+        states=[_new_state(key, user_name) for key in _OWN_STATE_KEYS],
+    )
 
-    # 同步段四：自己与随机抽选的其它成员决斗分数归零
+    # 同步段四：自己与随机抽选的其它成员决斗分数归零（批量写盘一次）
     candidates = [entry for entry in get_rank_entries(group_id) if entry[0] != user_id]
     picked = (
         random.sample(candidates, _OTHER_LIMIT)
         if len(candidates) > _OTHER_LIMIT
         else candidates
     )
-    _set_score(group_id, user_id, user_name, 0)
-    for target_id, target_name, _ in picked:
-        _set_score(group_id, target_id, target_name, 0)
+    targets = [(user_id, user_name), *((entry[0], entry[1]) for entry in picked)]
+    score_changes: list[tuple[int, str, int]] = []
+    for target_id, target_name in targets:
+        current = get_user_score(group_id, target_id)
+        if current:
+            score_changes.append((target_id, target_name, -current))
+    add_user_scores(group_id, score_changes)
 
     # 常规使用消息（引用触发指令），列表为空的段落不显示
     names = "、".join([user_name, *(name for _, name, _ in picked)])

@@ -14,10 +14,14 @@
   决斗，决斗是自己/对方发起的均可）；决斗出拳环节结束时接管结算：自己
   获胜则双方分数设为-1，平局或落败则自己分数设为-1。对方拒绝、决斗超时
   或决斗被取消时不介入（道具已消耗、不退还），由决斗按原始逻辑处理。
+  同场决斗中另有「魂迁」（720）时魂迁优先（720 与 096 分别按蓝色稀有、
+  白色普通的品质值注册结算接管者，见 switch.py）：096 的接管者不会被
+  调用，本次刺杀作废（道具已消耗、不退还），登记在 settled 事件中清理。
 
 本模块经决斗插件的事件服务订阅决斗生命周期事件（见 _shared/services.py）：
-096 在 settling 事件中设置 claimed 接管结算（决斗跳过默认结算与播报），
-并在 timeout/rejected/canceled 事件中清理等待中的刺杀登记。
+096 经结算接管服务（DuelSettleService）注册结算接管者，在 settling 事件
+全部处理器完成后按优先级接管结算；在 settled/timeout/rejected/canceled
+事件中清理等待中的刺杀登记。
 """
 
 import random
@@ -25,31 +29,32 @@ import random
 from nonebot import get_bots, logger
 from nonebot.adapters.onebot.v11 import Bot
 
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import member_display_name, send_group_text
 from src.plugins._shared.services import (
     DuelEvent,
     DuelEventKind,
     DuelEventService,
+    DuelSettleService,
     DuelSnapshot,
     DuelStateService,
     require_service,
 )
 from src.plugins.item._framework import (
     ItemDefinition,
-    ItemState,
     ItemType,
     ItemUseContext,
     Quality,
     add_item,
-    add_state,
     add_user_score,
     get_highest_score_user,
-    get_item_count,
-    get_state,
     get_user_score,
     register_item,
-    remove_item,
-    remove_state,
+)
+from src.plugins.item.items._durability import (
+    consume,
+    detail_durability,
+    transferable_count,
 )
 
 # 本组道具编号
@@ -57,18 +62,21 @@ _ID_FOOL = "094"
 _ID_KING = "095"
 _ID_COMMONER = "096"
 
-# 消息中群昵称的最大显示长度（字符数，与主模块保持一致）
-_NICKNAME_MAX_LENGTH = 12
+# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
+_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
-# 「天子之怒」的耐久参数与状态键：显示耐久 4/1000000，实际总耐久 4
+# 「天子之怒」的耐久参数与状态键：显示总耐久 1000000，实际总耐久 4
 _DURABILITY_TOTAL = 4
-_DURABILITY_DISPLAY = f"{_DURABILITY_TOTAL}/1000000"
+_DURABILITY_DISPLAY_TOTAL = 1_000_000
+_DURABILITY_DISPLAY = f"{_DURABILITY_TOTAL}/{_DURABILITY_DISPLAY_TOTAL}"
 _DURABILITY_STATE_KEY = f"{_ID_KING}.durability"
 
-# 决斗状态与事件服务（由决斗插件提供；_framework 已 require("duel")
-# 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
+# 决斗状态、事件与结算接管服务（由决斗插件提供；_framework 已
+# require("duel") 保证服务已注册；服务缺失时本道具模块加载失败并被
+# 加载器忽略）
 _state_service = require_service(DuelStateService)
 _event_service = require_service(DuelEventService)
+_settle_service = require_service(DuelSettleService)
 
 # 「庸夫之怒」的分数变化量
 _FOOL_SELF_COST = 80
@@ -111,59 +119,23 @@ async def _handle_fool(context: ItemUseContext) -> None:
     )
 
 
-def _durability_instances(group_id: int, user_id: int) -> list[int]:
-    """返回成员身上处于耗损中的「天子之怒」副本的剩余耐久列表。
-
-    全新（未使用过）的副本不在列表中；列表中的每一项为某个副本扣除
-    使用次数后的剩余耐久（1~3），按开始耗损的先后排列。
-    """
-    state = get_state(group_id, user_id, _DURABILITY_STATE_KEY)
-    if state is None:
-        return []
-    raw = state.data.get("remaining")
-    if not isinstance(raw, list):
-        return []
-    return [
-        value
-        for value in raw
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
-    ]
-
-
-def _store_durability_instances(
-    group_id: int, user_id: int, instances: list[int]
-) -> None:
-    """保存耗损中的副本耐久列表；列表为空时移除状态。"""
-    if instances:
-        add_state(
-            group_id,
-            user_id,
-            state=ItemState(
-                key=_DURABILITY_STATE_KEY,
-                item_id=_ID_KING,
-                data={"remaining": [int(value) for value in instances]},
-            ),
-        )
-        return
-    remove_state(group_id, user_id, _DURABILITY_STATE_KEY)
-
-
 def _transferable_count_kings(group_id: int, user_id: int) -> int:
     """返回可用于交换/合成的「天子之怒」数量（全新副本，耗损副本不计入）。"""
-    return max(
-        0,
-        get_item_count(group_id, user_id, _ID_KING)
-        - len(_durability_instances(group_id, user_id)),
+    return transferable_count(
+        group_id, user_id, item_id=_ID_KING, state_key=_DURABILITY_STATE_KEY
     )
 
 
 def _detail_durability_king(group_id: int, user_id: int) -> str:
     """「天子之怒」详情显示的耐久：存在耗损副本时显示第一个（最早开始
     耗损）副本的剩余耐久，否则显示满耐久。"""
-    instances = _durability_instances(group_id, user_id)
-    if instances:
-        return f"{instances[0]}/1000000"
-    return _DURABILITY_DISPLAY
+    return detail_durability(
+        group_id,
+        user_id,
+        state_key=_DURABILITY_STATE_KEY,
+        total=_DURABILITY_TOTAL,
+        display_total=_DURABILITY_DISPLAY_TOTAL,
+    )
 
 
 def _handle_consume_king(context: ItemUseContext) -> bool:
@@ -171,26 +143,7 @@ def _handle_consume_king(context: ItemUseContext) -> bool:
     消失），没有耗损副本时开始耗损一件全新副本（库存数量不变，耐久
     记录进入状态）。返回是否成功消耗。
     """
-    instances = _durability_instances(context.group_id, context.user_id)
-    if instances:
-        instances[0] -= 1
-        if instances[0] <= 0:
-            # 该副本耐久归零：道具消失（从库存移除，状态随列表清空清理）
-            instances.pop(0)
-            if not remove_item(context.group_id, context.user_id, _ID_KING):
-                logger.error(
-                    f"天子之怒：耐久归零的副本未能从库存移除"
-                    f"（群 {context.group_id}，成员 {context.user_id}）"
-                )
-        _store_durability_instances(context.group_id, context.user_id, instances)
-        return True
-    if get_item_count(context.group_id, context.user_id, _ID_KING) < 1:
-        # 不可达：主模块已在同步段校验持有道具
-        return False
-    _store_durability_instances(
-        context.group_id, context.user_id, [_DURABILITY_TOTAL - 1]
-    )
-    return True
+    return consume(context, state_key=_DURABILITY_STATE_KEY, total=_DURABILITY_TOTAL)
 
 
 def _can_use_king(context: ItemUseContext) -> str | None:
@@ -309,22 +262,11 @@ async def _send_duel_text(event: DuelEvent, text: str) -> None:
     await send_group_text(bot, event.group_id, text, label="道具消息")
 
 
-async def _on_duel_event(event: DuelEvent) -> None:
-    """决斗事件处理：决斗被拒绝、超时或被取消时清理刺杀登记；
-    出拳环节结束时由「布衣之怒」接管结算（设置 claimed 阻止决斗默认
-    结算与播报）。"""
-    if event.kind in (
-        DuelEventKind.TIMEOUT,
-        DuelEventKind.REJECTED,
-        DuelEventKind.CANCELED,
-    ):
-        _drop_assassinations(event.group_id, event.challenger_id, event.opponent_id)
-        return
-    if event.kind is not DuelEventKind.SETTLING:
-        return
+async def _settle_commoner(event: DuelEvent) -> bool:
+    """结算接管：本场有刺杀登记时按刺杀结果结算并返回是否接管。"""
     entry = _match_assassination(event.group_id, event.challenger_id, event.opponent_id)
     if entry is None:
-        return
+        return False
     _assassinations.discard(entry)
     _, user_id, target_id = entry
     if event.challenger_id == user_id:
@@ -333,7 +275,7 @@ async def _on_duel_event(event: DuelEvent) -> None:
     else:
         user_name = event.opponent_name
         target_name = event.challenger_name
-    # 同步段完成分数改名与接管标记，再发送结算消息
+    # 同步段完成分数改写，再发送结算消息
     if event.winner_id == user_id:
         _set_score(event.group_id, user_id, user_name, -1)
         _set_score(event.group_id, target_id, target_name, -1)
@@ -347,12 +289,26 @@ async def _on_duel_event(event: DuelEvent) -> None:
             f"{target_name} 环柱走，{user_name} 废。\n\n"
             f"{user_name} 决斗分数变为-1，{target_name} 决斗分数不变。"
         )
-    event.claimed = True
     logger.info(f"群 {event.group_id} 中 {user_id} 对 {target_id} 的刺杀已接管决斗结算")
     await _send_duel_text(event, text)
+    return True
+
+
+async def _on_duel_event(event: DuelEvent) -> None:
+    """决斗事件处理：决斗结束时（结算、超时、被拒绝或被取消）
+    清理刺杀登记，避免影响双方之后的新决斗。"""
+    if event.kind in (
+        DuelEventKind.SETTLED,
+        DuelEventKind.TIMEOUT,
+        DuelEventKind.REJECTED,
+        DuelEventKind.CANCELED,
+    ):
+        _drop_assassinations(event.group_id, event.challenger_id, event.opponent_id)
 
 
 _event_service.subscribe(_on_duel_event)
+# 结算接管优先级使用品质值：096（白色普通 1）低于 720（蓝色稀有 3）
+_settle_service.register_settler(Quality.WHITE.value, _settle_commoner)
 
 register_item(
     ItemDefinition(

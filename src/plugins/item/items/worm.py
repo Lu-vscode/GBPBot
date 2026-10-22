@@ -11,11 +11,13 @@ _name_variants）；状态持续期间成员修改群昵称属于未覆盖的边
 """
 
 import re
+import time
 from typing import Any
 
 from nonebot.adapters import Bot as BaseBot
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
 
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import truncate_name
 from src.plugins.item._framework import (
     ItemDefinition,
@@ -26,6 +28,7 @@ from src.plugins.item._framework import (
     add_state,
     list_state_holders,
     register_item,
+    state_version,
 )
 
 # 道具编号与状态键
@@ -38,12 +41,20 @@ _DURATION_SECONDS = 86400.0
 # 显示名替换的目标文案
 _REPLACEMENT = "区宝宝"
 
-# 消息中群昵称的常规最大显示长度（字符数，与主模块保持一致）
-_NICKNAME_MAX_LENGTH = 12
+# 消息中群昵称的常规最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
+_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 需要按「区」状态改写文本的发送接口：群消息与群合并转发；
 # 私聊消息不涉及群昵称，无需处理
 _REWRITE_APIS = frozenset({"send_msg", "send_group_msg", "send_group_forward_msg"})
+
+# 群昵称替换表的缓存：群号 -> (状态变更序号, 缓存到期时刻, 预编译正则)；
+# 无持有者时正则为 None（发送热路径直接返回）。状态未变化也没有状态
+# 到期时直接复用，无需遍历群内全部成员状态
+_group_patterns: dict[int, tuple[int, float, re.Pattern[str] | None]] = {}
+
+# 缓存条目上限：群数很多时整体清空重建，避免无限增长
+_GROUP_CACHE_LIMIT = 256
 
 
 def _name_variants(name: str) -> list[str]:
@@ -71,37 +82,63 @@ def _as_group_id(value: Any) -> int | None:
     return None
 
 
-def _group_names(group_id: int) -> list[str]:
-    """返回群内全部「区」状态持有者的显示名候选（长名在前，去重）。"""
+def _collect_group_names(group_id: int) -> tuple[list[str], float]:
+    """返回群内全部「区」状态持有者的显示名候选（长名在前，去重）与
+    这些状态中最早的过期时刻（没有到期状态时为无穷大）。"""
     names: set[str] = set()
+    deadline = float("inf")
     for _, state in list_state_holders(group_id, _STATE_KEY):
+        if state.expires_at is not None:
+            deadline = min(deadline, state.expires_at)
         raw = state.data.get("names")
         if not isinstance(raw, list):
             continue
         names.update(name for name in raw if isinstance(name, str) and name)
-    return sorted(names, key=len, reverse=True)
+    return sorted(names, key=len, reverse=True), deadline
 
 
-def _rewrite_text(text: str, names: list[str]) -> str:
+def _group_pattern(group_id: int) -> re.Pattern[str] | None:
+    """返回群内「区」状态持有者显示名的替换正则，无持有者时返回 None。
+
+    结果按状态变更序号与最早过期时刻缓存：状态未变化且没有状态过期
+    时直接复用上次编译的正则，发送热路径不再遍历群内全部成员状态。
+    状态新增/移除/清理后序号变化（见 _framework.state_version），
+    缓存自动失效重建。
+    """
+    now = time.time()
+    version = state_version()
+    cached = _group_patterns.get(group_id)
+    if cached is not None and cached[0] == version and now < cached[1]:
+        return cached[2]
+    names, deadline = _collect_group_names(group_id)
+    pattern = re.compile("|".join(re.escape(name) for name in names)) if names else None
+    if len(_group_patterns) >= _GROUP_CACHE_LIMIT:
+        _group_patterns.clear()
+    _group_patterns[group_id] = (version, deadline, pattern)
+    return pattern
+
+
+def _rewrite_text(text: str, pattern: re.Pattern[str] | None) -> str:
     """把文本中出现的「区」状态持有者显示名替换为"区宝宝"。
 
-    候选名按长名在前排列，经正则一次扫描替换：替换结果不会再被
-    其它候选名匹配。names 为空（无候选或均已为空名）时原样返回。
+    正则由 _group_pattern 提供（候选名长名在前，经一次扫描替换：
+    替换结果不会再被其它候选名匹配）；pattern 为 None 时原样返回。
     """
-    if not names:
+    if pattern is None:
         return text
-    pattern = "|".join(re.escape(name) for name in names)
-    return re.sub(pattern, _REPLACEMENT, text)
+    return pattern.sub(_REPLACEMENT, text)
 
 
-def _rewritten_message(message: Message, names: list[str]) -> Message | None:
+def _rewritten_message(
+    message: Message, pattern: re.Pattern[str] | None
+) -> Message | None:
     """返回文本段替换后的新消息；没有发生替换时返回 None。"""
     segments: list[MessageSegment] = []
     changed = False
     for segment in message:
         text = segment.data.get("text")
         if segment.type == "text" and isinstance(text, str):
-            replaced = _rewrite_text(text, names)
+            replaced = _rewrite_text(text, pattern)
             if replaced != text:
                 segments.append(MessageSegment.text(replaced))
                 changed = True
@@ -121,21 +158,23 @@ def _rewrite_send_data(data: dict[str, Any]) -> None:
     group_id = _as_group_id(data.get("group_id"))
     if group_id is None:
         return
-    names = _group_names(group_id)
-    if not names:
+    pattern = _group_pattern(group_id)
+    if pattern is None:
         return
     message = data.get("message")
     if isinstance(message, Message):
-        rewritten = _rewritten_message(message, names)
+        rewritten = _rewritten_message(message, pattern)
         if rewritten is not None:
             data["message"] = rewritten
     elif isinstance(message, str):
-        replaced = _rewrite_text(message, names)
+        replaced = _rewrite_text(message, pattern)
         if replaced != message:
             data["message"] = replaced
 
 
-def _rewrite_content_segments(content: list[Any], names: list[str]) -> None:
+def _rewrite_content_segments(
+    content: list[Any], pattern: re.Pattern[str] | None
+) -> None:
     """就地改写合并转发节点内容（消息段列表）中的文本段。"""
     for segment in content:
         if not isinstance(segment, dict) or segment.get("type") != "text":
@@ -145,7 +184,7 @@ def _rewrite_content_segments(content: list[Any], names: list[str]) -> None:
             continue
         text = segment_data.get("text")
         if isinstance(text, str):
-            segment_data["text"] = _rewrite_text(text, names)
+            segment_data["text"] = _rewrite_text(text, pattern)
 
 
 def _rewrite_forward_data(data: dict[str, Any]) -> None:
@@ -158,8 +197,8 @@ def _rewrite_forward_data(data: dict[str, Any]) -> None:
     group_id = _as_group_id(data.get("group_id"))
     if group_id is None:
         return
-    names = _group_names(group_id)
-    if not names:
+    pattern = _group_pattern(group_id)
+    if pattern is None:
         return
     messages = data.get("messages")
     if not isinstance(messages, list):
@@ -172,9 +211,9 @@ def _rewrite_forward_data(data: dict[str, Any]) -> None:
             continue
         content = node_data.get("content")
         if isinstance(content, str):
-            node_data["content"] = _rewrite_text(content, names)
+            node_data["content"] = _rewrite_text(content, pattern)
         elif isinstance(content, list):
-            _rewrite_content_segments(content, names)
+            _rewrite_content_segments(content, pattern)
 
 
 @Bot.on_calling_api
@@ -226,5 +265,6 @@ register_item(
         timing="自动使用",
         note="？！区区？！",
         handle_use=_handle_use,
+        state_labels=((_STATE_KEY, "区"),),
     )
 )

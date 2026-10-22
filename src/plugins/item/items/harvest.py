@@ -10,7 +10,7 @@ from src.plugins.item._framework import (
     ItemType,
     ItemUseContext,
     Quality,
-    add_user_score,
+    add_user_scores,
     get_rank_entries,
     register_item,
 )
@@ -20,8 +20,10 @@ async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：所有决斗分数非零的群成员决斗分数 +1。"""
     entries = get_rank_entries(context.group_id)
     if entries:
-        for user_id, user_name, _ in entries:
-            add_user_score(context.group_id, user_id, user_name, 1)
+        add_user_scores(
+            context.group_id,
+            [(user_id, user_name, 1) for user_id, user_name, _ in entries],
+        )
         await context.send(
             f"{context.user_name} 使用了 {context.item.label}，风调雨顺，国泰民安！\n"
             f"群内 {len(entries)} 名决斗分数非零的成员各 +1 分。"

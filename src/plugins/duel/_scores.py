@@ -3,7 +3,8 @@
 分数数据按群隔离，使用 localstore 长期存储在本地（scores.json），
 数据结构为：群号 -> {成员 QQ 号 -> {"name": 最近使用的群昵称,
 "score": 分数}}。文件不存在或损坏时视为空数据；旧版全局格式（不含
-群号）的记录会被忽略。写入时昵称统一按 NICKNAME_MAX_LENGTH 截断，
+群号）的记录会被忽略。写盘与损坏保护统一经 _shared/jsonfile.py 完成
+（原子替换、损坏现场备份）；写入时昵称统一按 NICKNAME_MAX_LENGTH 截断，
 与消息展示一致。
 
 本模块同时实现对外提供的决斗分数服务（DuelScoreService）：其它插件
@@ -14,19 +15,20 @@ score_service 由插件主模块统一注册。分数写入前会先经分数改
 统一注册。
 """
 
-import json
+from collections.abc import Sequence
 from typing import Any
 
 from nonebot import logger
 from nonebot_plugin_localstore import get_plugin_data_file
 
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH
+from src.plugins._shared.jsonfile import load_json_object, save_json_atomic
 from src.plugins._shared.onebot import truncate_name
 from src.plugins._shared.services import (
     DuelScoreInterceptService,
     DuelScoreService,
     ScoreInterceptor,
 )
-from src.plugins.duel._config import NICKNAME_MAX_LENGTH
 
 # 分数数据存储文件（localstore 插件数据目录）
 _SCORE_FILE = get_plugin_data_file("scores.json")
@@ -76,16 +78,7 @@ def _normalize_group_record(
 
 def _load_scores() -> dict[int, dict[int, dict[str, Any]]]:
     """从本地文件中读取分数数据，文件不存在或损坏时返回空数据。"""
-    if not _SCORE_FILE.exists():
-        return {}
-    try:
-        raw = json.loads(_SCORE_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning(f"读取决斗分数数据失败，本次将视为无分数数据：{exc}")
-        return {}
-    if not isinstance(raw, dict):
-        logger.warning("决斗分数数据格式异常（应为 JSON 对象），本次将视为无分数数据")
-        return {}
+    raw = load_json_object(_SCORE_FILE, "决斗分数数据")
     if any(_is_legacy_group_data(group_data) for group_data in raw.values()):
         # 旧版全局格式的记录（键为成员 QQ 号，值含 score/name）：
         # 不含群号，按群隔离后无法归属，直接忽略
@@ -104,14 +97,8 @@ def _load_scores() -> dict[int, dict[int, dict[str, Any]]]:
 
 
 def _save_scores() -> None:
-    """将分数数据写入本地文件，写入失败时仅记录错误。"""
-    try:
-        _SCORE_FILE.write_text(
-            json.dumps(_scores, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        logger.error(f"写取决斗分数数据失败，本次修改未保存：{exc}")
+    """将分数数据写入本地文件（原子替换），写入失败时仅记录错误。"""
+    save_json_atomic(_SCORE_FILE, _scores, "决斗分数数据")
 
 
 # 分数数据：群号 -> {成员 QQ 号 -> {"name": 最近使用的群昵称, "score": 分数}}
@@ -153,17 +140,40 @@ def _apply_interceptors(group_id: int, user_id: int, name: str, delta: int) -> i
     return delta
 
 
-def update_score(group_id: int, user_id: int, name: str, delta: int) -> None:
-    """更新指定群内成员的分数与昵称（昵称按显示规范截断）并写入本地文件。
+def _apply_score(group_id: int, user_id: int, name: str, delta: int) -> int:
+    """把一条分数变化写入内存数据（不落盘），返回更新后的分数。
 
-    写入前先经拦截器链改写实际生效的变化量（如「无懈可击」把一次
-    改变改为 0 完成抵消）。
+    变化量先经拦截器链改写实际生效值（如「无懈可击」把一次改变
+    改为 0 完成抵消）。
     """
     delta = _apply_interceptors(group_id, user_id, name, delta)
     group = _scores.setdefault(group_id, {})
     record = group.setdefault(user_id, {"name": name, "score": 0})
     record["name"] = truncate_name(name, NICKNAME_MAX_LENGTH)
     record["score"] = int(record["score"]) + delta
+    return int(record["score"])
+
+
+def update_score(group_id: int, user_id: int, name: str, delta: int) -> None:
+    """更新指定群内成员的分数与昵称（昵称按显示规范截断）并写入本地文件。
+
+    写入前先经拦截器链改写实际生效的变化量（如「无懈可击」把一次
+    改变改为 0 完成抵消）。
+    """
+    _apply_score(group_id, user_id, name, delta)
+    _save_scores()
+
+
+def update_scores(group_id: int, entries: Sequence[tuple[int, str, int]]) -> None:
+    """批量更新多名成员的分数与昵称，并只写入一次本地文件。
+
+    各条变化按顺序应用并依次经过拦截器链，语义等价于逐个调用
+    update_score；空序列不落盘。
+    """
+    if not entries:
+        return
+    for user_id, name, delta in entries:
+        _apply_score(group_id, user_id, name, delta)
     _save_scores()
 
 
@@ -208,6 +218,12 @@ class _DuelScoreService(DuelScoreService):
         if record is None:
             return 0
         return int(record["score"])
+
+    def add_scores(
+        self, group_id: int, entries: Sequence[tuple[int, str, int]]
+    ) -> None:
+        """批量更新成员分数（名字按显示规范截断），只落盘一次。"""
+        update_scores(group_id, entries)
 
     def lowest_member(self, group_id: int) -> int | None:
         """返回本群决斗低分榜第一名成员 QQ 号，没有负分成员时返回 None。

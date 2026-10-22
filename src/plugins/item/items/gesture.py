@@ -352,6 +352,7 @@ def _register_gesture_items() -> None:
                 note=meta.note,
                 can_use=_can_use,
                 handle_use=_handle_use,
+                state_labels=((meta.state_key, meta.state_label),),
             )
         )
 

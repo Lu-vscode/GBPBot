@@ -175,5 +175,6 @@ register_item(
         timing="任意",
         note="周而复始，始而复终。",
         handle_use=_handle_use,
+        state_labels=((_STATE_KEY, "衔尾蛇"),),
     )
 )

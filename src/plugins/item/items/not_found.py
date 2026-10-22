@@ -93,5 +93,6 @@ register_item(
         timing="自动使用",
         note="404 Not Found",
         handle_use=_handle_use,
+        state_labels=((_STATE_KEY, "404"),),
     )
 )

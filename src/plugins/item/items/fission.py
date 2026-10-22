@@ -21,7 +21,7 @@ from src.plugins.item._framework import (
     ItemType,
     ItemUseContext,
     Quality,
-    add_item,
+    add_items,
     draw_item_of_quality,
     get_user_score,
     quality_label,
@@ -71,6 +71,7 @@ async def _handle_use(context: ItemUseContext) -> None:
         context.add_score(-cost)
     produced: list[ItemDefinition] = []
     curses: list[ItemDefinition] = []
+    gained_ids: list[str] = []
     for _ in range(_PRODUCE_COUNTS[context.item.item_id]):
         item = draw_item_of_quality(produce_quality)
         if item is None:
@@ -84,8 +85,9 @@ async def _handle_use(context: ItemUseContext) -> None:
             # 黑色诅咒不写入库存：收集后统一按获得流程自动使用
             curses.append(item)
         else:
-            add_item(context.group_id, context.user_id, item.item_id)
+            gained_ids.append(item.item_id)
         produced.append(item)
+    add_items(context.group_id, context.user_id, gained_ids)
     # 按抽取顺序聚合同一件道具的显示文本（label 含编号，可作唯一键）
     counts: dict[str, int] = {}
     for item in produced:

@@ -20,10 +20,8 @@ from typing import Any
 from nonebot import get_plugin_config, logger
 from pydantic import BaseModel, ValidationInfo, field_validator
 
-# 决斗超时时间的默认值（分钟）、bot 消息中群昵称的最大显示长度
-# （字符数）、决斗点数上限、决斗发起的每小时次数上限（全局）
+# 决斗超时时间的默认值（分钟）、决斗点数上限、决斗发起的每小时次数上限（全局）
 _DEFAULT_DURATION_MINUTES = 10.0
-_DEFAULT_NICKNAME_MAX_LENGTH = 12
 _DEFAULT_MAX_MULTIPLIER = 100
 _DEFAULT_HOURLY_LIMIT = 20
 
@@ -125,16 +123,14 @@ class Config(BaseModel):
     """猜拳决斗插件配置。
 
     可在 `.env.{environment}` 文件中通过 `DUEL_*` 系列变量配置，
-    缺失或为空时使用默认行为（超时 10 分钟、群昵称最长 12 字符、
-    点数上限 100、每小时最多发起 20 次决斗、接受概率 1/点数、内置
-    文案）；机器人名单见 BOT_LIST 共享配置（_shared/config.py）。
+    缺失或为空时使用默认行为（超时 10 分钟、点数上限 100、每小时
+    最多发起 20 次决斗、接受概率 1/点数、内置文案）；群昵称最大显示
+    长度见共享配置 NICKNAME_MAX_LENGTH（_shared/config.py），机器人
+    名单见 BOT_LIST 共享配置。
     """
 
     duel_duration: float | None = None
     """决斗的存在时间上限（分钟），超过后自动超时结束，默认 10。"""
-
-    duel_nickname_max_length: int | None = None
-    """bot 消息中群昵称的最大显示长度（字符数），超过时截断并以"…"结尾，默认 12。"""
 
     duel_max_multiplier: int | None = None
     """决斗点数的上限（正整数），默认 100。"""
@@ -211,7 +207,6 @@ class Config(BaseModel):
         return _number_or_none(value, info, float)
 
     @field_validator(
-        "duel_nickname_max_length",
         "duel_max_multiplier",
         "duel_hourly_limit",
         mode="before",
@@ -248,16 +243,6 @@ DURATION_MINUTES = _positive_or_default(
     "需为正数，单位分钟",
 )
 DURATION_SECONDS = DURATION_MINUTES * 60.0
-
-# bot 消息中群昵称的最大显示长度（字符数）
-NICKNAME_MAX_LENGTH = int(
-    _positive_or_default(
-        plugin_config.duel_nickname_max_length,
-        _DEFAULT_NICKNAME_MAX_LENGTH,
-        "DUEL_NICKNAME_MAX_LENGTH",
-        "需为正整数",
-    )
-)
 
 # 决斗点数的上限
 MAX_MULTIPLIER = int(

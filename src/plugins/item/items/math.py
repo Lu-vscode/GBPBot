@@ -17,6 +17,7 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
 from nonebot.params import CommandArg
 from nonebot.rule import is_type
 
+from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, truncate_name
 from src.plugins.item._framework import (
     ItemDefinition,
@@ -40,8 +41,8 @@ _STATE_KEY = "curse.250"
 # 解题限时（秒）：自出题时刻起共 10 分钟
 _SOLVE_SECONDS = 600.0
 
-# 消息中群昵称的最大显示长度（字符数，与主模块保持一致）
-_NICKNAME_MAX_LENGTH = 12
+# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
+_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 题库：题面（纯文本，公式为 LaTeX 源码）与答案（均为整数）
 _PROBLEMS: tuple[tuple[str, int], ...] = (
