@@ -121,11 +121,7 @@ register_item(
         quality=Quality.GRAY,
         types=(ItemType.BUFF,),
         description="关键抵挡！",
-        effect=(
-            "使用后获得持续1小时的“玉璋护盾”状态：抵消一次黑色诅咒。\n"
-            "“玉璋护盾”状态可以叠加多层，各自独立计时；"
-            "获得黑色诅咒时消耗一层护盾并抵消该诅咒。"
-        ),
+        effect="使用后获得持续1小时的“玉璋护盾”状态：抵消一次黑色诅咒",
         condition="无",
         timing="任意",
         note="岩石的重量，令人安心",

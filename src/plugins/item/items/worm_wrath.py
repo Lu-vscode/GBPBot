@@ -89,12 +89,7 @@ register_item(
         quality=Quality.GRAY,
         types=(ItemType.OPTIONAL,),
         description="损人不利己",
-        effect=(
-            f'使用"/item.use {_ITEM_ID} @使用对象"使其获得黑色诅咒道具'
-            '"678 ！？区区？！"，并按其获得流程自动使用。\n'
-            "“678 ！？区区？！”的效果：获得持续1天的“区”状态，"
-            "期间Bot称呼该成员时把名字变成“区宝宝”。"
-        ),
+        effect=f'使用"/item.use {_ITEM_ID} @使用对象"使其获得"678 ！？区区？！"',
         condition="自己拥有“区”状态",
         timing="任意",
         note="扭曲的蠕动，阴暗的爬行！",

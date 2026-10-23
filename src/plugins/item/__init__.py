@@ -523,7 +523,10 @@ async def handle_item_list(
     entries = list_user_items(event.group_id, event.user_id)
     if not entries:
         await _send_text(
-            bot, event.group_id, "你还没有任何道具，签到可以获得随机道具。"
+            bot,
+            event.group_id,
+            "你还没有任何道具，签到可以获得随机道具。",
+            reply_to=event.message_id,
         )
         return
     lines = ["你的道具："]
@@ -531,7 +534,7 @@ async def handle_item_list(
         f"{definition.label}【{quality_label(definition.quality)}】×{count}"
         for definition, count in entries
     )
-    await _send_text(bot, event.group_id, "\n".join(lines))
+    await _send_text(bot, event.group_id, "\n".join(lines), reply_to=event.message_id)
 
 
 item_detail_cmd = on_command(
