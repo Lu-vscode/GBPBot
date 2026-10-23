@@ -7,10 +7,14 @@
 
 - `BOT_LIST`：机器人名单（机器人 QQ 号列表，所有群通用）。名单中的
   机器人不参与决斗（不能向其发起决斗），道具交换时也不能向其发起。
+- `NICKNAME_GUARD_DISABLED_GROUPS`：不启用群昵称保护的群号列表，
+  群昵称保护插件读取该配置，篡天道具（002）在禁用本群前读取并合并
+  现有名单。
 - `NICKNAME_MAX_LENGTH`：bot 消息中群昵称的最大显示长度（字符数），
   决斗与道具插件共用，避免两侧截断规则不一致。
 """
 
+import json
 from functools import lru_cache
 from typing import Any
 
@@ -26,6 +30,9 @@ class Config(BaseModel):
 
     bot_list: Any = None
     """机器人名单：机器人 QQ 号列表（JSON 数组），默认为空。"""
+
+    nickname_guard_disabled_groups: Any = None
+    """不启用群昵称保护的群号列表（JSON 数组），默认为空。"""
 
     nickname_max_length: Any = None
     """群昵称最大显示长度（正整数），默认 12。"""
@@ -89,6 +96,48 @@ def get_bot_list() -> frozenset[int]:
     配置无效时记录 warning 并视为空名单。
     """
     return _normalize_bot_list(get_plugin_config(Config).bot_list)
+
+
+def _parse_group_list(value: Any) -> frozenset[int] | None:
+    """把配置项解析为群号集合，格式无效时返回 None。
+
+    兼容已解码的列表与 JSON 数组字符串；缺失（None）与空白字符串
+    视为空集合。
+    """
+    if value is None:
+        return frozenset()
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return frozenset()
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, list):
+        return None
+    return frozenset(
+        group_id for item in value if (group_id := _as_qq(item)) is not None
+    )
+
+
+@lru_cache(maxsize=1)
+def get_nickname_guard_disabled_groups() -> frozenset[int]:
+    """返回不启用群昵称保护的群号（共享配置 NICKNAME_GUARD_DISABLED_GROUPS）。
+
+    群昵称保护插件在加载时读取同一配置；篡天道具（002）禁用本群前
+    经本函数读取现有名单并合并写入，避免覆盖已禁用的其它群。首次调用
+    时读取配置并缓存；缺失或为空时返回空集合，格式无效时记录 warning
+    并视为空。
+    """
+    raw = get_plugin_config(Config).nickname_guard_disabled_groups
+    groups = _parse_group_list(raw)
+    if groups is None:
+        logger.warning(
+            "配置 NICKNAME_GUARD_DISABLED_GROUPS 格式无效（应为群号列表），已视为空"
+        )
+        return frozenset()
+    return groups
 
 
 # bot 消息中群昵称的最大显示长度（字符数）：决斗与道具插件共用。
