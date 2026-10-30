@@ -1,6 +1,6 @@
 """道具「强运」（编号 712）：蓝色稀有、Buff型。
 
-使用后获得持续 5 小时的“强运”状态：决斗中需要发送三个猜拳表情，
+使用后获得持续 3 小时的“强运”状态：决斗中需要发送三个猜拳表情，
 至少一个表情获胜则胜利、否则至少一个表情平局则平局、否则失败。
 
 - 通过决斗手势配额服务把自己的所需表情数量提高为 3（双方都持有
@@ -39,8 +39,8 @@ _ITEM_ID = "712"
 _STATE_KEY = f"{_ITEM_ID}.luck"
 _ITEM_LABEL = f"{_ITEM_ID} 强运"
 
-# “强运”状态的持续时长（秒）：5 小时
-_DURATION_SECONDS = 5 * 3600.0
+# “强运”状态的持续时长（秒）：3 小时
+_DURATION_SECONDS = 3 * 3600.0
 
 # 持有“强运”时决斗中需要发送的猜拳表情数量
 _GESTURE_COUNT = 3
@@ -68,7 +68,7 @@ def _quota_provider(group_id: int, user_id: int, _opponent_id: int) -> int:
 
 
 async def _handle_use(context: ItemUseContext) -> None:
-    """使用效果：获得持续 5 小时的“强运”状态并发送提示。"""
+    """使用效果：获得持续 3 小时的“强运”状态并发送提示。"""
     add_state(
         context.group_id,
         context.user_id,
@@ -77,7 +77,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     )
     await context.send(
         f"{context.user_name} 使用了 {context.item.label}，"
-        f"获得了持续5小时的“强运”状态。"
+        f"获得了持续3小时的“强运”状态。"
     )
 
 
@@ -235,7 +235,7 @@ register_item(
         types=(ItemType.BUFF,),
         description="我听见了「强运」的回响",
         effect=(
-            "使用后获得持续5小时的“强运”状态：决斗中你需发送3个猜拳表情，"
+            "使用后获得持续3小时的“强运”状态：决斗中你需发送3个猜拳表情，"
             "只要有1个表情获胜则你胜利；否则只要有1个表情平局则平局；"
             "否则你失败。"
         ),

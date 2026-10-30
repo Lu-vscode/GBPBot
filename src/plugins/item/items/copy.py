@@ -30,6 +30,9 @@ _COPY_ITEMS = (
     ("105", Quality.GRAY, "复制（灰）"),
 )
 
+# 本组道具的编号集合：供其它道具判定「复制道具」（如「复得之轮」排除）
+COPY_ITEM_IDS = frozenset(item_id for item_id, _, _ in _COPY_ITEMS)
+
 
 def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：参数与要复制的目标道具；返回错误文案时本次不消耗。"""

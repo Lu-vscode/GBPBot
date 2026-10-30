@@ -6,7 +6,9 @@
 道具模块提供道具编号、总耐久与状态键即可复用本模块的消耗、交换
 数量复核与详情耐久显示（见 consume / transferable_count /
 detail_durability），示例见 wrath.py（095，总耐久 4）与 flee.py
-（886，总耐久 3）。
+（886，总耐久 3）。耐久型道具在导入期登记（见 register_durable），
+其它道具转移副本时据此一并转移剩余耐久（见 move_damaged_instance，
+如「强塞」127）。
 """
 
 from nonebot import logger
@@ -23,6 +25,23 @@ from src.plugins.item._framework import (
 
 # 状态附加数据中保存副本剩余耐久列表的键
 _INSTANCES_KEY = "remaining"
+
+# 已登记的耐久型道具：道具编号 -> 耗损状态键（由各耐久道具模块登记）
+_DURABLE_STATE_KEYS: dict[str, str] = {}
+
+
+def register_durable(item_id: str, state_key: str) -> None:
+    """登记一件耐久型道具及其耗损状态键（由该道具模块在导入期调用）。
+
+    供其它道具（如「强塞」）判断道具是否为耐久型，并在转移副本时
+    一并转移剩余耐久。
+    """
+    _DURABLE_STATE_KEYS[item_id] = state_key
+
+
+def durable_state_key(item_id: str) -> str | None:
+    """返回耐久型道具的耗损状态键，非耐久型道具返回 None。"""
+    return _DURABLE_STATE_KEYS.get(item_id)
 
 
 def instances(group_id: int, user_id: int, state_key: str) -> list[int]:
@@ -106,6 +125,41 @@ def consume(context: ItemUseContext, *, state_key: str, total: int) -> bool:
         instances=[total - 1],
     )
     return True
+
+
+def move_damaged_instance(
+    group_id: int,
+    from_user: int,
+    to_user: int,
+    *,
+    item_id: str,
+    state_key: str,
+) -> int | None:
+    """把一件耗损中的副本从一名成员转移给另一名成员，返回其剩余耐久。
+
+    取最早开始耗损的副本（即详情中显示的那一件）；来源成员没有耗损
+    副本时不作修改并返回 None（此时转移的是全新副本）。调用方应在完成
+    库存转移后调用；接收方的耗损记录追加在其列表末尾。
+    """
+    values = instances(group_id, from_user, state_key)
+    if not values:
+        return None
+    remaining = values.pop(0)
+    _store(
+        group_id,
+        from_user,
+        state_key=state_key,
+        item_id=item_id,
+        instances=values,
+    )
+    _store(
+        group_id,
+        to_user,
+        state_key=state_key,
+        item_id=item_id,
+        instances=[*instances(group_id, to_user, state_key), remaining],
+    )
+    return remaining
 
 
 def transferable_count(

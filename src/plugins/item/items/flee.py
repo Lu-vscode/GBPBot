@@ -27,6 +27,7 @@ from src.plugins.item._framework import (
 from src.plugins.item.items._durability import (
     consume,
     detail_durability,
+    register_durable,
     transferable_count,
 )
 
@@ -34,6 +35,9 @@ from src.plugins.item.items._durability import (
 _ITEM_ID = "886"
 _DURABILITY_TOTAL = 3
 _DURABILITY_STATE_KEY = f"{_ITEM_ID}.durability"
+
+# 登记为耐久型道具：供其它道具（如「强塞」）转移耗损副本时查询状态键
+register_durable(_ITEM_ID, _DURABILITY_STATE_KEY)
 
 # 决斗状态与取消服务（由决斗插件提供；_framework 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）

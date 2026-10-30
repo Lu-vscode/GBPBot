@@ -54,6 +54,7 @@ from src.plugins.item._framework import (
 from src.plugins.item.items._durability import (
     consume,
     detail_durability,
+    register_durable,
     transferable_count,
 )
 
@@ -70,6 +71,9 @@ _DURABILITY_TOTAL = 4
 _DURABILITY_DISPLAY_TOTAL = 1_000_000
 _DURABILITY_DISPLAY = f"{_DURABILITY_TOTAL}/{_DURABILITY_DISPLAY_TOTAL}"
 _DURABILITY_STATE_KEY = f"{_ID_KING}.durability"
+
+# 登记为耐久型道具：供其它道具（如「强塞」）转移耗损副本时查询状态键
+register_durable(_ID_KING, _DURABILITY_STATE_KEY)
 
 # 决斗状态、事件与结算接管服务（由决斗插件提供；_framework 已
 # require("duel") 保证服务已注册；服务缺失时本道具模块加载失败并被

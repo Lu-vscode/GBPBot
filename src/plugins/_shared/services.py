@@ -197,7 +197,7 @@ class DuelEventKind(StrEnum):
 
     SETTLED = "settled"
     """分数结算与结果播报完成后触发；结算被处理器接管时在接管处理器
-    完成结算后触发。"""
+    完成结算后触发（此时事件的 claimed 为 True）。"""
 
     TIMEOUT = "timeout"
     """决斗超时认领移除后触发。"""
@@ -254,7 +254,8 @@ class DuelEvent:
     claimed: bool = False
     """settling 事件中由处理器设为 True 表示接管本次结算：决斗跳过默认的
     分数结算与结果播报，由处理器自行完成结算；settled 事件仍会在接管
-    处理器完成结算后发布。"""
+    处理器完成结算后发布。settled 事件中本字段表示本场结算是否已被接管
+    （接管时默认的分数结算没有执行，分数可能被接管者自行改写）。"""
 
     result_prefix: str | None = None
     """settling 事件中由处理器设置的前缀文本（如道具效果说明），默认结算

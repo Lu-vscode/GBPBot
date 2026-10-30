@@ -127,7 +127,8 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
     DuelSettleService 注册，第一个返回 True 的接管本场结算；接管与直接在
     settling 事件中设置 claimed 的效果相同：跳过默认的分数结算与结果播报、
     也不使用前缀，由接管者自行完成），结算与播报后发布 settled 事件
-    （接管结算时在接管者完成结算后发布）。
+    （接管结算时在接管者完成结算后发布，事件的 claimed 为 True，供订阅方
+    判断默认的分数结算是否已执行）。
     """
     result = _decide_winner(duel)
     event = make_duel_event(
@@ -162,6 +163,7 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
                 winner_name=final[1] if final is not None else None,
                 loser_name=final[3] if final is not None else None,
                 draw=final is None,
+                claimed=True,
             )
         )
         return

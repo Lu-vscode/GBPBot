@@ -1,15 +1,22 @@
-"""道具「挑戰數學有趣的難題」（编号 250）：黑色诅咒、诅咒型。
+"""道具「挑戰數學有趣的難題」（编号 250）与「華為手錶」（编号 251）。
 
-获得后自动使用：随机出一道高等数学难题（题库见 _PROBLEMS，答案为
-整数、公式为 LaTeX 源码），限时 10 分钟（_SOLVE_SECONDS），用
-/item.250.answer <答案> 回答。答对即解除诅咒；答错、参数不合法或
-到期未答则把决斗分数归零（到期结算在过期状态被清理时立即尝试
-发送，机器人不在线或发送失败时只记录日志、不补发）。所有 @ 均为
-伪 @（"@昵称"为纯文本，非 at 消息段）。
+250 为黑色诅咒、诅咒型：获得后自动使用，随机出一道高等数学难题（题库
+见 _PROBLEMS，答案为整数、公式为 LaTeX 源码），限时 10 分钟
+（_SOLVE_SECONDS），用 /item.250.answer <答案> 回答。答对即解除诅咒，
+并按作答时的剩余回答时长决定是否发放奖品：剩余 x 分钟即有 x/10 的
+概率获得一件 251，未获奖时只有提示文案。答错、参数不合法或到期未答则
+把决斗分数归零（到期结算在过期状态被清理时立即尝试发送，机器人不在线
+或发送失败时只记录日志、不补发）。所有 @ 均为伪 @（"@昵称"为纯文本，
+非 at 消息段）。
+
+251 为灰色垃圾、消耗型：使用后发送当前时间（精确到秒、含日期），并引用
+触发指令的消息。
 """
 
 import random
 import re
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 from nonebot import get_bots, logger, on_command
@@ -26,6 +33,7 @@ from src.plugins.item._framework import (
     ItemType,
     ItemUseContext,
     Quality,
+    add_item,
     add_state,
     add_user_score,
     get_state,
@@ -38,8 +46,12 @@ from src.plugins.item._framework import (
 _ITEM_ID = "250"
 _STATE_KEY = "curse.250"
 
-# 解题限时（秒）：自出题时刻起共 10 分钟
-_SOLVE_SECONDS = 600.0
+# 奖品「華為手錶」的编号：答对时按剩余回答时长决定是否发放
+_WATCH_ITEM_ID = "251"
+
+# 解题限时（分钟）与换算后的秒数：自出题时刻起共 10 分钟
+_SOLVE_MINUTES = 10
+_SOLVE_SECONDS = _SOLVE_MINUTES * 60.0
 
 # 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
 _NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
@@ -71,6 +83,18 @@ def _parse_answer(text: str) -> int | None:
     if not re.fullmatch(r"[+-]?\d+", text):
         return None
     return int(text)
+
+
+def _reward_chance(expires_at: float | None, now: float) -> float:
+    """按作答时刻的剩余回答时长计算获得奖品的概率。
+
+    剩余时长向下取整到分钟（秒级余数不增加概率），剩余 0 分钟时概率
+    为 0、剩余 _SOLVE_MINUTES 分钟时概率为 1，按分钟线性递减。
+    """
+    if expires_at is None or expires_at <= now:
+        return 0.0
+    remaining_minutes = int((expires_at - now) // 60)
+    return min(remaining_minutes / _SOLVE_MINUTES, 1.0)
 
 
 def _state_name(data: dict[str, Any], user_id: int) -> str:
@@ -109,12 +133,11 @@ async def _handle_use(context: ItemUseContext) -> None:
         ),
         duration_seconds=_SOLVE_SECONDS,
     )
-    minutes = int(_SOLVE_SECONDS // 60)
     await context.send(
         f"@{context.user_name}\n"
         "请解答以下数学难题，答案一定是整数：\n"
         f"{statement}\n\n"
-        f"限时 {minutes} 分钟，在规定时间内使用 "
+        f"限时 {_SOLVE_MINUTES} 分钟，在规定时间内使用 "
         f"/item.{_ITEM_ID}.answer <答案> 回答。"
     )
 
@@ -136,15 +159,28 @@ async def handle_item_math_answer(
     # 同步段：先删除状态再判定与结算，避免并发指令重复回答
     remove_state(event.group_id, event.user_id, _STATE_KEY)
     answer = data.get("answer")
-    if (
+    correct = (
         isinstance(answer, int)
         and not isinstance(answer, bool)
         and _parse_answer(args.extract_plain_text().strip()) == answer
-    ):
+    )
+    if correct:
+        chance = _reward_chance(state.expires_at, time.time())
+        if random.random() >= chance:
+            await send_group_text(
+                bot,
+                event.group_id,
+                f"@{name}\n獎一塊華為手錶",
+                event.message_id,
+                label="道具消息",
+            )
+            return
+        # 先发放奖品再发送文案：文案发送失败也不影响成员获得道具
+        add_item(event.group_id, event.user_id, _WATCH_ITEM_ID)
         await send_group_text(
             bot,
             event.group_id,
-            f"@{name}\n獎一塊華為手錶",
+            f"@{name}\n獎一塊華為手錶！",
             event.message_id,
             label="道具消息",
         )
@@ -181,6 +217,12 @@ async def _handle_state_expire(context: ItemStateExpireContext) -> None:
     )
 
 
+async def _handle_watch_use(context: ItemUseContext) -> None:
+    """使用效果：发送当前时间（本地时区，含日期、精确到秒）。"""
+    now = datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    await context.send(f"现在是{now}")
+
+
 register_item(
     ItemDefinition(
         item_id=_ITEM_ID,
@@ -198,5 +240,20 @@ register_item(
         note="發自我的手機",
         handle_use=_handle_use,
         handle_state_expire=_handle_state_expire,
+    )
+)
+
+register_item(
+    ItemDefinition(
+        item_id=_WATCH_ITEM_ID,
+        name="華為手錶",
+        quality=Quality.GRAY,
+        types=(ItemType.CONSUMABLE,),
+        description="告诉学生們，去修birkar的課，交論文，得分最高的，獎一个华为手表。",
+        effect="使用后bot会告诉你当前时间。",
+        condition="无",
+        timing="任意",
+        note="發自我的手機",
+        handle_use=_handle_watch_use,
     )
 )

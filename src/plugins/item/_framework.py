@@ -14,7 +14,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nonebot import logger
 from nonebot.plugin import require
@@ -232,6 +232,9 @@ async def run_item_use(context: ItemUseContext, *, consume: bool = True) -> bool
     返回是否成功执行（使用条件未通过或消耗失败时返回 False，失败文案
     已由本函数发送）。供道具模块以其他成员的身份复用 /item.use 的完整
     使用流程（如「夺心魄」代替目标成员使用其道具）。
+
+    道具效果执行成功后依次调用使用后钩子（见 add_item_use_hook），
+    供「复得之轮」等道具在成员使用其它道具后附加效果。
     """
     if context.item.can_use is not None:
         error = context.item.can_use(context)
@@ -254,7 +257,43 @@ async def run_item_use(context: ItemUseContext, *, consume: bool = True) -> bool
             return False
     if context.item.handle_use is not None:
         await context.item.handle_use(context)
+    await run_item_use_hooks(context)
     return True
+
+
+# 道具使用后的附加效果钩子：在道具效果成功执行后按注册顺序调用（如
+# 「复得之轮」在成员使用其它道具后按概率发放道具）
+ItemUseHook = Callable[["ItemUseContext"], Awaitable[None]]
+
+# 已注册的使用后钩子（按注册顺序）
+_item_use_hooks: list[ItemUseHook] = []
+
+# 钩子处理异常（单个钩子出错时不影响本次使用结果与其它钩子）
+_ITEM_USE_HOOK_ERRORS = (Exception,)
+
+
+def add_item_use_hook(hook: ItemUseHook) -> None:
+    """注册道具使用后的附加效果钩子（同一钩子重复注册会被忽略）。
+
+    钩子在道具自身的校验、消耗与效果全部成功后按注册顺序调用；拿到
+    的是本次使用的完整上下文（道具、使用者、所在群与参数）。钩子自行
+    判断是否生效（如按使用者身上的状态、道具品质或编号），抛出的异常
+    只记录错误日志，不影响道具模块已发送的消息与其它钩子。
+    """
+    if hook not in _item_use_hooks:
+        _item_use_hooks.append(hook)
+
+
+async def run_item_use_hooks(context: ItemUseContext) -> None:
+    """依次调用道具使用后的附加效果钩子（由 run_item_use 调用）。"""
+    for hook in _item_use_hooks:
+        try:
+            await hook(context)
+        except _ITEM_USE_HOOK_ERRORS as exc:
+            logger.error(
+                f"道具使用后钩子执行出错（{context.item.label}，"
+                f"群 {context.group_id}，成员 {context.user_id}）：{exc}"
+            )
 
 
 # 黑色诅咒自动使用拦截器：在诅咒的详细信息消息发送后、效果执行前
@@ -753,6 +792,21 @@ def get_state(group_id: int, user_id: int, key: str) -> ItemState | None:
 def remove_state(group_id: int, user_id: int, key: str) -> bool:
     """移除成员身上指定键的状态并落盘，返回是否存在该状态。"""
     return remove_states(group_id, user_id, [key]) > 0
+
+
+def set_state_data(group_id: int, user_id: int, key: str, data: dict[str, Any]) -> bool:
+    """覆盖成员身上指定键有效状态的附加数据并落盘（过期时刻保持不变）。
+
+    供道具模块在状态有效期内更新附加记录（如刷新冷却时刻）；状态不
+    存在或已过期时不做任何事并返回 False。
+    """
+    state = get_state(group_id, user_id, key)
+    if state is None:
+        return False
+    state.data = dict(data)
+    save_states(_states)
+    _bump_state_version()
+    return True
 
 
 def remove_states(group_id: int, user_id: int, keys: Sequence[str]) -> int:
