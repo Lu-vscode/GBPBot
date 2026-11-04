@@ -1,4 +1,4 @@
-"""道具「储蓄罐」（编号 184）：白色普通、Buff型。
+"""道具「储蓄罐」（编号 184）：绿色精良、Buff型。
 
 使用后获得持续 1 天的“储蓄”状态（储蓄分数初始为 0，登记在状态附加数据
 中）：决斗获胜结算完成后储蓄分数增加该场决斗的点数；决斗平局不变化；
@@ -217,7 +217,7 @@ register_item(
     ItemDefinition(
         item_id=_ITEM_ID,
         name="储蓄罐",
-        quality=Quality.WHITE,
+        quality=Quality.GREEN,
         types=(ItemType.BUFF,),
         description="老实决斗，很枯燥吧？",
         effect=(

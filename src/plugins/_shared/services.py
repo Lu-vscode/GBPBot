@@ -489,6 +489,25 @@ class DuelCancelService(Protocol):
         ...
 
 
+@runtime_checkable
+class SignScoreBonusService(Protocol):
+    """签到分数加成服务（由道具插件提供）。"""
+
+    def extra_score(self, group_id: int, user_id: int) -> int:
+        """返回成员本次签到额外获得的决斗分数（无加成时返回 0）。
+
+        由签到插件在发放签到奖励的同步段内调用，返回值与签到基础
+        分数相加后计入本次签到获得的决斗分数；因此实现应按签到
+        时刻的成员状态即时计算（如道具状态层数），不做任何落盘或
+        消息发送，并保持快捷。
+
+        参数:
+            group_id: 群号。
+            user_id: 成员 QQ 号。
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class GrantedItem:
     """一次道具发放的结果（由 ItemService.grant_random 返回）。"""

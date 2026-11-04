@@ -10,8 +10,8 @@
 与决斗、道具插件的交互通过跨插件服务实现（见 _shared/services.py）：
 加载时用 require("duel")、require("item") 声明依赖，确保分数与道具
 服务提供方已加载并完成注册；签到时经服务注册中心取用分数服务增加
-决斗分数、取用道具服务发放随机道具（黑色诅咒由道具服务在签到文案
-之后完成信息播报与自动使用）。
+决斗分数（基础分数与道具加成之和）、取用道具服务发放随机道具（黑色
+诅咒由道具服务在签到文案之后完成信息播报与自动使用）。
 """
 
 import json
@@ -35,6 +35,7 @@ from src.plugins._shared.services import (
     DuelScoreService,
     GrantedItem,
     ItemService,
+    SignScoreBonusService,
     require_service,
 )
 
@@ -277,6 +278,7 @@ require("duel")
 require("item")
 _score_service = require_service(DuelScoreService)
 _item_service = require_service(ItemService)
+_score_bonus_service = require_service(SignScoreBonusService)
 
 
 def _current_date() -> str:
@@ -296,20 +298,22 @@ def _sender_display_name(event: GroupMessageEvent) -> str:
 
 def _try_sign(
     group_id: int, user_id: int, name: str, date: str
-) -> tuple[bool, GrantedItem | None]:
+) -> tuple[bool, GrantedItem | None, int]:
     """尝试为成员签到（在同步段调用，避免并发事件重复签到）。
 
-    当天尚未签到时：追加一条签到记录、经分数服务发放决斗分数奖励、
-    经道具服务发放随机道具（编号写入本次记录，抽取失败为 ""），最后
-    落盘并返回 (True, 道具发放结果或 None)；当天已签到时：不改变任何
-    状态，返回 (False, None)。
+    当天尚未签到时：追加一条签到记录、向分数服务发放决斗分数（基础
+    分数与道具加成之和，加成见 SignScoreBonusService）、经道具服务
+    发放随机道具（编号写入本次记录，抽取失败为 ""），最后落盘并返回
+    (True, 道具发放结果或 None, 本次获得的决斗分数)；当天已签到时：
+    不改变任何状态，返回 (False, None, 0)。
     """
     group = _signs.setdefault(group_id, {})
     records = group.setdefault(user_id, [])
     if any(record["date"] == date for record in records):
-        return False, None
+        return False, None, 0
     records.append({"date": date, "item": ""})
-    _score_service.add_score(group_id, user_id, name, _score_gain)
+    gain = _score_gain + _score_bonus_service.extra_score(group_id, user_id)
+    _score_service.add_score(group_id, user_id, name, gain)
     granted = _item_service.grant_random(group_id, user_id, name)
     if granted is not None:
         records[-1]["item"] = granted.item_id
@@ -320,9 +324,9 @@ def _try_sign(
         item_text = f"，获得道具 {granted.item_id} {granted.item_name}"
     logger.info(
         f"群 {group_id} 成员 {user_id}（{name}）签到成功"
-        f"（累计 {len(records)} 次），决斗分数+{_score_gain}{item_text}"
+        f"（累计 {len(records)} 次），决斗分数+{gain}{item_text}"
     )
-    return True, granted
+    return True, granted, gain
 
 
 async def _send_text(
@@ -350,7 +354,9 @@ async def handle_sign(bot: Bot, event: GroupMessageEvent) -> None:
     """处理 /sign 命令：每日签到，成功时发放决斗分数与随机道具。"""
     name = _sender_display_name(event)
     # 同步段：判定并更新记录、发放奖励与道具，避免并发事件在判定与更新之间插入
-    signed, granted = _try_sign(event.group_id, event.user_id, name, _current_date())
+    signed, granted, gain = _try_sign(
+        event.group_id, event.user_id, name, _current_date()
+    )
     if not signed:
         logger.debug(f"群 {event.group_id} 成员 {event.user_id} 今天已签到，跳过")
         await _send_text(
@@ -358,10 +364,10 @@ async def handle_sign(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
     if granted is None:
-        text = _text("success_no_item", score=_score_gain)
+        text = _text("success_no_item", score=gain)
     else:
         text = _text(
-            "success", score=_score_gain, item=f"{granted.item_id} {granted.item_name}"
+            "success", score=gain, item=f"{granted.item_id} {granted.item_name}"
         )
     await _send_text(bot, event.group_id, text, reply_to=event.message_id)
     if granted is not None:

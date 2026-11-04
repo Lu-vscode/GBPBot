@@ -8,11 +8,11 @@ _framework.py，各道具模块位于 items/ 下并在导入时自动注册。
 
 本插件经跨插件服务注册中心（见 _shared/services.py）对外提供道具发放
 服务（ItemService）：签到等插件调用 grant_random 发放道具，随后调用
-handle_acquisition 完成黑色诅咒的展示与自动使用。
+handle_acquisition 完成黑色诅咒的展示与自动使用；同时提供签到分数
+加成服务（SignScoreBonusService），签到插件据此计算道具带来的额外分数。
 """
 
 import math
-import random
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -36,7 +36,14 @@ from src.plugins._shared.onebot import (
 from src.plugins._shared.services import (
     GrantedItem,
     ItemService,
+    SignScoreBonusService,
     register_service,
+)
+from src.plugins.item._craft import (
+    DEFAULT_CRAFT_ODDS,
+    craft_error,
+    draw_craft_results,
+    set_craft_odds,
 )
 from src.plugins.item._framework import (
     ItemDefinition,
@@ -46,7 +53,6 @@ from src.plugins.item._framework import (
     add_item,
     add_items,
     detail_text,
-    draw_item_of_quality,
     draw_random_item,
     exchange_items,
     get_item,
@@ -59,6 +65,8 @@ from src.plugins.item._framework import (
     remove_items,
     run_item_use,
     set_draw_weights,
+    sign_bonus,
+    transferable_count,
 )
 
 __plugin_meta__ = PluginMetadata(
@@ -128,11 +136,6 @@ _DRAW_KEYS = {
     Quality.PURPLE: "purple",
     Quality.GOLD: "gold",
 }
-
-# 合成概率的默认值：品质低一级 / 高一级 / 高两级
-_DEFAULT_CRAFT_DOWN = 0.24
-_DEFAULT_CRAFT_UP = 0.75
-_DEFAULT_CRAFT_UP2 = 0.01
 
 # 概率比较的容差（默认值浮点相加可能有微小误差，不做无谓归一化）
 _PROBABILITY_TOLERANCE = 1e-9
@@ -234,19 +237,18 @@ def _resolve_draw_weights() -> dict[Quality, float]:
 
 def _resolve_craft_odds() -> tuple[float, float, float]:
     """解析合成概率（低一级、高一级、高两级）：总概率不为 1 时归一化。"""
+    default_down, default_up, default_up2 = DEFAULT_CRAFT_ODDS
     down = _parse_probability(
-        plugin_config.item_craft_down, _DEFAULT_CRAFT_DOWN, "ITEM_CRAFT_DOWN"
+        plugin_config.item_craft_down, default_down, "ITEM_CRAFT_DOWN"
     )
-    up = _parse_probability(
-        plugin_config.item_craft_up, _DEFAULT_CRAFT_UP, "ITEM_CRAFT_UP"
-    )
+    up = _parse_probability(plugin_config.item_craft_up, default_up, "ITEM_CRAFT_UP")
     up2 = _parse_probability(
-        plugin_config.item_craft_up2, _DEFAULT_CRAFT_UP2, "ITEM_CRAFT_UP2"
+        plugin_config.item_craft_up2, default_up2, "ITEM_CRAFT_UP2"
     )
     total = down + up + up2
     if total <= 0:
         logger.error("道具配置 ITEM_CRAFT_* 的总概率不大于 0，已使用默认合成概率")
-        return _DEFAULT_CRAFT_DOWN, _DEFAULT_CRAFT_UP, _DEFAULT_CRAFT_UP2
+        return DEFAULT_CRAFT_ODDS
     if not math.isclose(
         total, 1.0, rel_tol=_PROBABILITY_TOLERANCE, abs_tol=_PROBABILITY_TOLERANCE
     ):
@@ -279,9 +281,9 @@ def _resolve_test_groups() -> frozenset[int]:
     )
 
 
-# 抽取品质的权重（注入框架）与合成概率
+# 抽取品质的权重（注入框架）与合成概率（注入合成模块）
 set_draw_weights(_resolve_draw_weights())
-_craft_down, _craft_up, _craft_up2 = _resolve_craft_odds()
+set_craft_odds(_resolve_craft_odds())
 
 # 测试群群号（JSON 数组配置，缺失或无效时为空）：仅这些群中的超级用户
 # 可使用 /item.get 获取测试道具
@@ -308,18 +310,6 @@ def _item_label(item_id: str) -> str:
     if definition is None:
         return item_id
     return definition.label
-
-
-def _transferable_count(group_id: int, user_id: int, item_id: str) -> int:
-    """返回成员可用于交换/合成的道具数量。
-
-    道具模块可经 transferable_count 钩子排除不可交易的副本（如耐久
-    耗损的副本）；未注册编号按库存数量处理。
-    """
-    definition = get_item(item_id)
-    if definition is not None and definition.transferable_count is not None:
-        return definition.transferable_count(group_id, user_id)
-    return get_item_count(group_id, user_id, item_id)
 
 
 def _parse_targets(args: Message) -> tuple[int, ...]:
@@ -381,6 +371,18 @@ class _ItemService(ItemService):
 # 供签到等插件发放道具时调用；/item.get 命令也复用同一实例
 _item_service = _ItemService()
 register_service(ItemService, _item_service)
+
+
+class _SignScoreBonusService(SignScoreBonusService):
+    """签到分数加成服务的实现：汇总各道具登记的加成提供者。"""
+
+    def extra_score(self, group_id: int, user_id: int) -> int:
+        """返回成员本次签到额外获得的决斗分数（无道具加成时为 0）。"""
+        return sign_bonus(group_id, user_id)
+
+
+# 将签到分数加成注册为跨插件服务（如「+1」状态按层数提高签到分数）
+register_service(SignScoreBonusService, _SignScoreBonusService())
 
 
 @dataclass
@@ -465,50 +467,6 @@ def _remove_exchange(exchange: _PendingExchange) -> bool:
     return False
 
 
-def _shift_quality(quality: Quality, delta: int) -> Quality:
-    """按档位升降品质，并夹取到合法品质范围。
-
-    库存中出现黑色诅咒等异常数据时，品质运算不得越界（否则构造
-    Quality 会抛 ValueError）；夹取后仍保持原有合成语义（如灰色
-    “低一级”得到黑色诅咒）。
-    """
-    value = max(
-        Quality.BLACK_CURSE.value,
-        min(Quality.GOLD.value, quality.value + delta),
-    )
-    return Quality(value)
-
-
-def _draw_craft_results(quality: Quality) -> tuple[str, list[ItemDefinition]] | None:
-    """抽取合成结果（结果文案前缀与获得的道具列表）；目标品质的道具池
-    为空时返回 None。
-
-    结果前缀按抽取档位为"合成失败"（低一级）、"合成成功"（高一级）与
-    "合成大成功"（高两级）；紫色史诗"高两级"超出最高品质时改为获得
-    两件金色传说。
-    """
-    roll = random.random()
-    if roll < _craft_down:
-        prefix = "合成失败"
-        target = _shift_quality(quality, -1)
-    elif roll < _craft_down + _craft_up:
-        prefix = "合成成功"
-        target = _shift_quality(quality, 1)
-    elif quality is Quality.PURPLE:
-        first = draw_item_of_quality(Quality.GOLD)
-        second = draw_item_of_quality(Quality.GOLD)
-        if first is None or second is None:
-            return None
-        return "合成大成功", [first, second]
-    else:
-        prefix = "合成大成功"
-        target = _shift_quality(quality, 2)
-    item = draw_item_of_quality(target)
-    if item is None:
-        return None
-    return prefix, [item]
-
-
 item_list_cmd = on_command("item.list", rule=is_type(GroupMessageEvent))
 
 
@@ -578,40 +536,6 @@ async def handle_item_detail(
 item_craft_cmd = on_command("item.craft", rule=is_type(GroupMessageEvent))
 
 
-def _craft_error(
-    group_id: int, user_id: int, first: ItemDefinition, second: ItemDefinition
-) -> str | None:
-    """校验两件合成材料（品质相同、非金色、数量足够且可交易），
-    返回错误文案或 None。"""
-    if first.quality != second.quality:
-        return f"{first.label} 与 {second.label} 的品质不同，无法合成。"
-    if first.quality is Quality.GOLD:
-        return "金色传说道具无法合成。"
-    if first.quality is Quality.BLACK_CURSE:
-        return "黑色诅咒无法作为合成材料。"
-    needed = 2 if first.item_id == second.item_id else 1
-    if first.item_id == second.item_id:
-        need_text = f"{first.label}×2"
-    else:
-        need_text = f"{first.label}、{second.label} 各一件"
-    if (
-        get_item_count(group_id, user_id, first.item_id) < needed
-        or get_item_count(group_id, user_id, second.item_id) < needed
-    ):
-        return f"合成需要 {need_text}，你的数量不足。"
-    unavailable = next(
-        (
-            definition
-            for definition in (first, second)
-            if _transferable_count(group_id, user_id, definition.item_id) < needed
-        ),
-        None,
-    )
-    if unavailable is not None:
-        return f"合成需要 {need_text}，但 {unavailable.label} 目前无法用于合成。"
-    return None
-
-
 @item_craft_cmd.handle()
 async def handle_item_craft(
     bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
@@ -634,11 +558,11 @@ async def handle_item_craft(
         )
         return
     # 同步段：复查数量、抽取结果、消耗材料并登记，避免并发指令重复消耗
-    error = _craft_error(event.group_id, event.user_id, definition_a, definition_b)
+    error = craft_error(event.group_id, event.user_id, definition_a, definition_b)
     if error is not None:
         await _send_text(bot, event.group_id, error, reply_to=event.message_id)
         return
-    drawn = _draw_craft_results(definition_a.quality)
+    drawn = draw_craft_results(definition_a.quality)
     if drawn is None:
         await _send_text(
             bot,
@@ -686,14 +610,14 @@ async def _start_exchange(
     """
     if get_item_count(event.group_id, event.user_id, first.item_id) < 1:
         return f"你未拥有道具 {first.label}。"
-    if _transferable_count(event.group_id, event.user_id, first.item_id) < 1:
+    if transferable_count(event.group_id, event.user_id, first.item_id) < 1:
         return f"你的道具 {first.label} 目前无法用于交换。"
     target_name = await member_display_name(
         bot, event.group_id, target, _NICKNAME_MAX_LENGTH
     )
     if get_item_count(event.group_id, target, second.item_id) < 1:
         return f"{target_name} 未拥有道具 {second.label}。"
-    if _transferable_count(event.group_id, target, second.item_id) < 1:
+    if transferable_count(event.group_id, target, second.item_id) < 1:
         return f"{target_name} 的道具 {second.label} 目前无法用于交换。"
     if _find_pair_exchange(event.group_id, event.user_id, target) is not None:
         return _EXCHANGE_PAIR_ACTIVE
@@ -818,7 +742,7 @@ async def handle_item_exchange_accept(
         )
         return
     if (
-        _transferable_count(
+        transferable_count(
             event.group_id, exchange.initiator_id, exchange.initiator_item_id
         )
         < 1
@@ -841,7 +765,7 @@ async def handle_item_exchange_accept(
             reply_to=event.message_id,
         )
         return
-    if _transferable_count(event.group_id, event.user_id, exchange.target_item_id) < 1:
+    if transferable_count(event.group_id, event.user_id, exchange.target_item_id) < 1:
         # 接受方道具已不可交易：保留交换（可再次尝试接受或拒绝）
         await _send_text(
             bot,
