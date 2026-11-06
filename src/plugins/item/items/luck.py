@@ -3,23 +3,24 @@
 使用后获得持续 3 小时的“强运”状态：决斗中需要发送三个猜拳表情，
 至少一个表情获胜则胜利、否则至少一个表情平局则平局、否则失败。
 
-- 通过决斗手势配额服务把自己的所需表情数量提高为 3（双方都持有
-  “强运”时各自同样发送 3 个，按接收顺序一一对应判定三轮）；
-- 单方持有时每个表情与对方手势单独按猜拳规则与手势状态触发规则
-  （见 gesture 模块的 micro_result）判定出胜/平/负，再聚合为最终
-  结果（至少一个胜则胜、否则至少一个平则平、否则负）；双方都持有
-  时按接收顺序一一对应判定后统计胜次：仅一方至少获胜一次时该方
-  获胜，否则平局。判定结果经 settling 事件改写胜负；
+效果经决斗手势服务（DuelGestureService）注册为整局判定效果，并在同一
+注册中声明所需手势数量（3 个）：判定由决斗插件的判定引擎统一执行，本
+模块不订阅 settling 事件、不改写胜负。
+
+- 双方都持有“强运”时各自同样发送 3 个，按接收顺序一一对应判定后
+  统计胜次：仅一方至少获胜一次时该方获胜，否则平局；
+- 仅一方持有时逐表情与对方首手势判定后聚合（至少一个胜则胜、否则
+  至少一个平则平、否则负），每组手势复用决斗插件的单组判定（含其它
+  单组规则，如「特殊手势」的状态触发）；
 - 结算文案在默认结算消息前拼接“（<拥有者> 使用了 712 强运）”，
-  双方强运对拼时拼接“（双方强运效果对拼，一一对应判定三轮）”
-  （其它道具已设置的前缀保持不变，本道具的文案追加在其后）。
+  双方强运对拼时拼接“（双方强运效果对拼，一一对应判定三轮）”。
 """
 
 from src.plugins._shared.services import (
-    DuelEvent,
-    DuelEventKind,
-    DuelEventService,
-    DuelGestureQuotaService,
+    DuelGestureContext,
+    DuelGestureService,
+    DuelGestureSide,
+    DuelGestureVerdict,
     require_service,
 )
 from src.plugins.item._framework import (
@@ -32,7 +33,6 @@ from src.plugins.item._framework import (
     get_state,
     register_item,
 )
-from src.plugins.item.items import gesture
 
 # 道具编号、状态键与道具显示名
 _ITEM_ID = "712"
@@ -45,10 +45,12 @@ _DURATION_SECONDS = 3 * 3600.0
 # 持有“强运”时决斗中需要发送的猜拳表情数量
 _GESTURE_COUNT = 3
 
-# 决斗事件与手势配额服务（由决斗插件提供；_framework 已 require("duel")
+# 整局判定效果的优先级：取道具品质值
+_EFFECT_PRIORITY = Quality.BLUE
+
+# 决斗手势服务（由决斗插件提供；_framework 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
-_event_service = require_service(DuelEventService)
-_quota_service = require_service(DuelGestureQuotaService)
+_gesture_service = require_service(DuelGestureService)
 
 
 def _has_luck(group_id: int, user_id: int) -> bool:
@@ -56,11 +58,11 @@ def _has_luck(group_id: int, user_id: int) -> bool:
     return get_state(group_id, user_id, _STATE_KEY) is not None
 
 
-def _quota_provider(group_id: int, user_id: int, _opponent_id: int) -> int:
-    """手势配额提供者：持有“强运”时需发送 3 个猜拳表情。
+def _required_gestures(group_id: int, user_id: int, _opponent_id: int) -> int:
+    """所需手势提供者：持有“强运”时需发送 3 个猜拳表情。
 
     双方都持有“强运”时各自同样发送 3 个并按接收顺序一一对应判定
-    （见 _clash_result），所需数量与对手是否持有没有关系。
+    （见 _clash_outcome），所需数量与对手是否持有没有关系。
     """
     if _has_luck(group_id, user_id):
         return _GESTURE_COUNT
@@ -90,35 +92,38 @@ def _used_prefix(name: str) -> str:
 _CLASH_PREFIX = "（双方强运效果对拼，一一对应判定三轮）\n"
 
 
-def _first_gesture(gestures: tuple[int, ...]) -> int:
-    """返回手势序列的第一个手势（调用方保证序列非空）。"""
-    return gestures[0]
+def _winner_of(
+    outcome: int, winner: DuelGestureSide, loser: DuelGestureSide
+) -> int | None:
+    """把 1（前者胜）/0（平局）/-1（后者胜）映射为胜者 QQ 号。"""
+    if outcome > 0:
+        return winner.user_id
+    if outcome < 0:
+        return loser.user_id
+    return None
 
 
-def _clash_result(
-    group_id: int,
-    challenger_id: int,
-    challenger_gestures: tuple[int, ...],
-    opponent_id: int,
-    opponent_gestures: tuple[int, ...],
+def _clash_outcome(
+    context: DuelGestureContext,
+    challenger: DuelGestureSide,
+    opponent: DuelGestureSide,
 ) -> int:
     """双方强运对拼的判定：手势按接收顺序一一对应逐轮判定后统计胜次。
 
     返回 1（挑战者胜）、0（平局）、-1（挑战者负）：仅一方至少获胜
     一次时该方获胜；双方都至少获胜一次、或双方均未获胜时为平局。
-    每轮用 gesture.micro_result 判定（含手势状态触发规则）；手势数量
+    每轮复用决斗插件的单组判定（含单组规则与基础规则）；手势数量
     不一致（动态时序异常）时按较短一方截断配对。
     """
     outcomes = [
-        gesture.micro_result(
-            group_id,
-            challenger_id,
+        context.pair_outcome(
+            challenger.user_id,
             challenger_gesture,
-            opponent_id,
+            opponent.user_id,
             opponent_gesture,
-        )
+        ).outcome
         for challenger_gesture, opponent_gesture in zip(
-            challenger_gestures, opponent_gestures, strict=False
+            challenger.gestures, opponent.gestures, strict=False
         )
     ]
     challenger_won = any(result > 0 for result in outcomes)
@@ -128,23 +133,19 @@ def _clash_result(
     return 1 if challenger_won else -1
 
 
-def _aggregate_multi_result(
-    group_id: int,
-    multi_id: int,
-    multi_gestures: tuple[int, ...],
-    single_id: int,
-    single_gesture: int,
+def _aggregate(
+    context: DuelGestureContext, multi: DuelGestureSide, single: DuelGestureSide
 ) -> int:
     """逐表情聚合强运方的判定：1 强运方胜、0 平局、-1 强运方负。
 
-    每个表情与对方手势单独用 gesture.micro_result 判定出胜/平/负，
-    再聚合：至少一个胜则胜；否则至少一个平则平；否则负。
+    每个表情与对方首手势单独判定出胜/平/负，再聚合：至少一个胜则胜；
+    否则至少一个平则平；否则负。
     """
     results = [
-        gesture.micro_result(
-            group_id, multi_id, actor_gesture, single_id, single_gesture
-        )
-        for actor_gesture in multi_gestures
+        context.pair_outcome(
+            multi.user_id, gesture, single.user_id, single.gestures[0]
+        ).outcome
+        for gesture in multi.gestures
     ]
     if 1 in results:
         return 1
@@ -153,79 +154,42 @@ def _aggregate_multi_result(
     return -1
 
 
-def _apply_result(event: DuelEvent, result: int, first_id: int, second_id: int) -> None:
-    """按判定结果改写事件的胜负。
+def _judge(context: DuelGestureContext) -> DuelGestureVerdict | None:
+    """整局判定效果：任一方持有“强运”时按强运规则裁决本场胜负。
 
-    result 为 1 时 first_id 胜、-1 时 second_id 胜、0 时为平局
-    （胜者与负者均置空）。
-    """
-    if result > 0:
-        event.winner_id = first_id
-        event.loser_id = second_id
-    elif result < 0:
-        event.winner_id = second_id
-        event.loser_id = first_id
-    else:
-        event.winner_id = None
-        event.loser_id = None
-
-
-async def _on_duel_event(event: DuelEvent) -> None:
-    """决斗事件处理：双方出拳环节结束时按“强运”判定并改写胜负，
-    并在默认结算消息前拼接效果文案。
-
-    双方都持有“强运”时按接收顺序一一对应判定（见 _clash_result）；
+    双方都持有“强运”时按接收顺序一一对应判定（见 _clash_outcome）；
     仅一方持有时逐表情聚合判定（至少一个胜、否则至少一个平、否则
-    负）；双方都未持有时不做任何事（由 gesture 模块按手势状态处理）。
+    负）；双方都未持有、或发多个手势的一方未持有“强运”（动态时序
+    异常，如状态在出拳后到期）时交回默认判定（返回 None）。
     """
-    if event.kind is not DuelEventKind.SETTLING:
-        return
-    challenger_gestures = event.challenger_gestures
-    opponent_gestures = event.opponent_gestures
-    if not challenger_gestures or not opponent_gestures:
-        # 不可达：settling 事件在双方完成出手后发布
-        return
-    challenger_luck = _has_luck(event.group_id, event.challenger_id)
-    opponent_luck = _has_luck(event.group_id, event.opponent_id)
+    challenger = context.challenger
+    opponent = context.opponent
+    challenger_luck = _has_luck(context.group_id, challenger.user_id)
+    opponent_luck = _has_luck(context.group_id, opponent.user_id)
     if challenger_luck and opponent_luck:
-        # 双方强运对拼：各 3 个手势按接收顺序一一对应判定后统计胜次
-        result = _clash_result(
-            event.group_id,
-            event.challenger_id,
-            challenger_gestures,
-            event.opponent_id,
-            opponent_gestures,
+        outcome = _clash_outcome(context, challenger, opponent)
+        return DuelGestureVerdict(
+            winner_id=_winner_of(outcome, challenger, opponent),
+            detail=_CLASH_PREFIX,
         )
-        _apply_result(event, result, event.challenger_id, event.opponent_id)
-        event.result_prefix = (event.result_prefix or "") + _CLASH_PREFIX
-        return
-    if len(challenger_gestures) > 1:
-        multi_id = event.challenger_id
-        multi_name = event.challenger_name
-        multi_gestures = challenger_gestures
-        single_id = event.opponent_id
-        single_gesture = _first_gesture(opponent_gestures)
-    elif len(opponent_gestures) > 1:
-        multi_id = event.opponent_id
-        multi_name = event.opponent_name
-        multi_gestures = opponent_gestures
-        single_id = event.challenger_id
-        single_gesture = _first_gesture(challenger_gestures)
+    if len(challenger.gestures) > 1:
+        multi, single = challenger, opponent
+    elif len(opponent.gestures) > 1:
+        multi, single = opponent, challenger
     else:
-        return
-    if not _has_luck(event.group_id, multi_id):
-        # 多手势方未持有强运（动态时序异常，如状态在出拳后到期）：
-        # 不改写判定，由决斗插件按逐手势聚合的默认判定结算
-        return
-    result = _aggregate_multi_result(
-        event.group_id, multi_id, multi_gestures, single_id, single_gesture
+        return None
+    if not _has_luck(context.group_id, multi.user_id):
+        return None
+    outcome = _aggregate(context, multi, single)
+    return DuelGestureVerdict(
+        winner_id=_winner_of(outcome, multi, single),
+        detail=_used_prefix(multi.name),
     )
-    _apply_result(event, result, multi_id, single_id)
-    event.result_prefix = (event.result_prefix or "") + _used_prefix(multi_name)
 
 
-_quota_service.add_quota_provider(_quota_provider)
-_event_service.subscribe(_on_duel_event)
+_gesture_service.register_effect(
+    _EFFECT_PRIORITY, _ITEM_LABEL, _judge, required=_required_gestures
+)
 
 register_item(
     ItemDefinition(

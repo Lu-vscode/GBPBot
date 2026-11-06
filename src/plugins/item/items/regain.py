@@ -1,17 +1,18 @@
 """道具「复得之轮」（编号 325）：金色传说、复合型。
 
 使用 /item.use 325 <n> 获得持续 n 天的「复得」状态：状态有效期间，
-每天 8:00~23:00 每次使用非黑色诅咒的非复制道具（复制道具编号见
-copy.py）时，有 1/2-arctan(7ln((n-1)/14))/π 的概率获得一件随机道具
+每天 8:00~23:00 每次使用非黑色诅咒的非复制道具（带 ItemTag.COPY
+标签的道具）时，有 1/2-arctan(7ln((n-1)/14))/π 的概率获得一件随机道具
 （抽取概率与签到相同，抽到黑色诅咒时按诅咒获得流程播报并自动使用），
 否则获得一件随机黑色诅咒道具；每次触发后冷却 1 小时，冷却期间使用
 道具既不触发效果也不发送提示。
 
 触发经框架的道具使用后钩子（add_item_use_hook）实现：道具效果成功
 执行后由本模块判断使用者是否持有状态、是否处于生效时段与冷却中，因此
-道具模块之间无需互相引用。状态附加数据保存天数（days）与冷却截止
-时刻（ready_at），冷却记录经 set_state_data 刷新，不改变状态的过期
-时刻；状态到期由定时清理静默删除，不发送提示。
+道具模块之间无需互相引用；“复制道具”经框架的标签查询（has_tag）
+识别，不从具体道具模块导入编号集合。状态附加数据保存天数（days）与
+冷却截止时刻（ready_at），冷却记录经 set_state_data 刷新，不改变状态的
+过期时刻；状态到期由定时清理静默删除，不发送提示。
 """
 
 import math
@@ -24,6 +25,7 @@ from nonebot import logger
 from src.plugins.item._framework import (
     ItemDefinition,
     ItemState,
+    ItemTag,
     ItemType,
     ItemUseContext,
     Quality,
@@ -34,11 +36,11 @@ from src.plugins.item._framework import (
     draw_item_of_quality,
     draw_random_item,
     get_state,
+    has_tag,
     quality_label,
     register_item,
     set_state_data,
 )
-from src.plugins.item.items.copy import COPY_ITEM_IDS
 
 # 道具编号与状态键
 _ITEM_ID = "325"
@@ -199,13 +201,13 @@ async def _on_item_used(context: ItemUseContext) -> None:
 
     使用复得之轮本身不触发（那一次使用换来的是状态，而非效果）；
     黑色诅咒由自身的获得流程处理，复制道具按设计文档排除在触发条件
-    之外，两者均不影响其它道具的触发。
+    之外（标签见 ItemTag.COPY），两者均不影响其它道具的触发。
     """
     if context.item.item_id == _ITEM_ID:
         return
     if context.item.quality is Quality.BLACK_CURSE:
         return
-    if context.item.item_id in COPY_ITEM_IDS:
+    if has_tag(context.item.item_id, ItemTag.COPY):
         return
     state = get_state(context.group_id, context.user_id, _STATE_KEY)
     if state is None or not _active_now():

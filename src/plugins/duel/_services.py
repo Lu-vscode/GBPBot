@@ -1,8 +1,8 @@
-"""决斗对外服务的实现（机器人接受、挑衅、点数缩放、取消与手势配额）。
+"""决斗对外服务的实现（机器人接受、挑衅、点数缩放、取消与手势服务）。
 
 本模块实现五个跨插件服务契约（见 _shared/services.py），服务实例
 （bot_accept_service、provoke_service、multiplier_service、
-cancel_service、gesture_quota_service）由插件主模块统一注册到服务
+cancel_service、gesture_service）由插件主模块统一注册到服务
 注册中心：
 - DuelBotAcceptService：供道具等插件校验机器人接受概率函数表达式；
 - DuelProvokeService：供道具等插件强制对方接受决斗，并由机器人代替
@@ -10,8 +10,9 @@ cancel_service、gesture_quota_service）由插件主模块统一注册到服务
 - DuelMultiplierService：供道具等插件缩放进行中决斗的点数，缩放到 0
   时取消决斗并发布取消事件；
 - DuelCancelService：供道具等插件主动取消进行中的决斗并发布取消事件；
-- DuelGestureQuotaService：供道具等插件注册手势配额提供者，提高成
-  员在一场决斗中需要发送的猜拳表情数量（如“强运”效果）。
+- DuelGestureService：供道具等插件注册单组手势判定规则与整局判定
+  效果（可同时提高成员所需发送的猜拳表情数量），判定由 _judgement
+  统一执行（如「特殊手势」与「强运」效果）。
 """
 
 from nonebot import logger
@@ -21,8 +22,10 @@ from src.plugins._shared.services import (
     DuelBotAcceptService,
     DuelCancelService,
     DuelEventKind,
+    DuelGestureJudge,
+    DuelGesturePairRule,
     DuelGestureQuotaProvider,
-    DuelGestureQuotaService,
+    DuelGestureService,
     DuelMultiplierService,
     DuelProvokeService,
     DuelScaleOutcome,
@@ -31,8 +34,8 @@ from src.plugins._shared.services import (
 from src.plugins.duel._config import accept_expr_error
 from src.plugins.duel._events import fire_duel_event, make_duel_event
 from src.plugins.duel._flow import send_bot_rps
+from src.plugins.duel._judgement import register_effect, register_pair_rule
 from src.plugins.duel._state import (
-    add_gesture_quota_provider,
     find_pair_duel,
     find_pending_duel,
     find_provoked_duel,
@@ -151,12 +154,25 @@ class _DuelCancelService(DuelCancelService):
         return snapshot(duel)
 
 
-class _DuelGestureQuotaService(DuelGestureQuotaService):
-    """决斗手势配额服务的实现：供道具等插件注册手势配额提供者。"""
+class _DuelGestureService(DuelGestureService):
+    """决斗手势服务的实现：供道具等插件注册判定规则与整局判定效果。"""
 
-    def add_quota_provider(self, provider: DuelGestureQuotaProvider) -> None:
-        """注册手势配额提供者（同一提供者重复注册会被忽略）。"""
-        add_gesture_quota_provider(provider)
+    def register_pair_rule(
+        self, priority: int, name: str, rule: DuelGesturePairRule
+    ) -> None:
+        """注册单组手势判定规则（同一规则重复注册会被忽略）。"""
+        register_pair_rule(priority, name, rule)
+
+    def register_effect(
+        self,
+        priority: int,
+        name: str,
+        judge: DuelGestureJudge,
+        *,
+        required: DuelGestureQuotaProvider | None = None,
+    ) -> None:
+        """注册整局判定效果（同一判定重复注册会被忽略）。"""
+        register_effect(priority, name, judge, required=required)
 
 
 # 服务实例（由插件主模块统一注册）
@@ -164,4 +180,4 @@ bot_accept_service = _DuelBotAcceptService()
 provoke_service = _DuelProvokeService()
 multiplier_service = _DuelMultiplierService()
 cancel_service = _DuelCancelService()
-gesture_quota_service = _DuelGestureQuotaService()
+gesture_service = _DuelGestureService()

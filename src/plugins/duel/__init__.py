@@ -5,8 +5,9 @@ DUEL_MAX_MULTIPLIER 配置，默认 100），被 @ 的成员可通过
 `/duel.accept @成员` 接受或 `/duel.reject @成员` 拒绝；接受后双方发送
 QQ"包剪锤"表情，机器人根据双方手势判定胜负：胜者分数 +点数、负者分数
 -点数，平局分数不变；成员所需的猜拳表情数量默认为 1，可由道具经
-手势配额服务提高（见 _state.required_gestures），多手势的胜负按逐
-手势聚合判定（见 _flow.py）；各群分数相互独立，分数数据使用 localstore 长期
+手势服务提高，胜负由 _judgement.py 的判定引擎统一判定（整局判定效果
+→ 单组判定规则 → 基础猜拳规则）；各群分数相互独立，分数数据使用
+localstore 长期
 存储在本地，并且作为"决斗分数服务"经跨插件服务注册中心（见
 _shared/services.py）供其它插件增减分数与查询高/低分榜第一名，同时
 提供决斗分数拦截服务（DuelScoreInterceptService：供道具等插件在
@@ -24,9 +25,9 @@ settling 事件的处理器可接管结算），机器人接受概率函数服�
 （DuelMultiplierService：供道具等插件缩放进行中决斗的点数，缩放
 到 0 时取消决斗并发布取消事件）与决斗取消服务
 （DuelCancelService：供道具等插件主动取消进行中的决斗并发布
-取消事件）与决斗手势配额服务（DuelGestureQuotaService：供道具等
-插件注册手势配额提供者，提高成员在一场决斗中需要发送的猜拳表情
-数量，如“强运”效果）；
+取消事件）与决斗手势服务（DuelGestureService：供道具等插件
+注册单组手势判定规则与整局判定效果，可同时提高成员在一场决斗中
+需要发送的猜拳表情数量，如“特殊手势”与“强运”效果）；
 机器人名单（BOT_LIST）由 _shared/config.py
 的共享配置提供，供各插件共享；群聊消息发送、群昵称获取与截断等通用
 逻辑复用 _shared/onebot.py 的共享工具。
@@ -40,9 +41,10 @@ settling 事件的处理器可接管结算），机器人接受概率函数服�
 
 本插件为包结构（由原单文件 duel.py 拆分而来）：配置与文案见
 _config.py，手势解析见 _gestures.py，分数存储与分数服务见
-_scores.py，决斗状态与状态服务见 _state.py，事件分发与事件服务见
-_events.py，消息发送与超时提示延迟发送见 _messages.py，结算与机器人
-出手见 _flow.py，对外服务实现见 _services.py，发起限频见 _limit.py。
+_scores.py，决斗状态与状态服务见 _state.py，判定引擎与手势效果注册见
+_judgement.py，事件分发与事件服务见 _events.py，消息发送与超时提示
+延迟发送见 _messages.py，结算与机器人出手见 _flow.py，对外服务实现见
+_services.py，发起限频见 _limit.py。
 """
 
 import math
@@ -69,7 +71,7 @@ from src.plugins._shared.services import (
     DuelEvent,
     DuelEventKind,
     DuelEventService,
-    DuelGestureQuotaService,
+    DuelGestureService,
     DuelMultiplierService,
     DuelProvokeService,
     DuelScoreInterceptService,
@@ -110,6 +112,7 @@ from src.plugins.duel._events import (
 )
 from src.plugins.duel._flow import resolve_duel, send_bot_rps
 from src.plugins.duel._gestures import extract_gesture, is_rps_message
+from src.plugins.duel._judgement import required_gestures
 from src.plugins.duel._limit import (
     limit_reached,
     record_initiation,
@@ -130,7 +133,7 @@ from src.plugins.duel._scores import (
 from src.plugins.duel._services import (
     bot_accept_service,
     cancel_service,
-    gesture_quota_service,
+    gesture_service,
     multiplier_service,
     provoke_service,
 )
@@ -143,7 +146,6 @@ from src.plugins.duel._state import (
     find_pending_duel,
     find_provoked_duel,
     remove_duel,
-    required_gestures,
     state_service,
     take_gesture,
 )
@@ -185,7 +187,7 @@ register_service(DuelBotAcceptService, bot_accept_service)
 register_service(DuelProvokeService, provoke_service)
 register_service(DuelMultiplierService, multiplier_service)
 register_service(DuelCancelService, cancel_service)
-register_service(DuelGestureQuotaService, gesture_quota_service)
+register_service(DuelGestureService, gesture_service)
 
 
 def _truncate_name(name: str) -> str:

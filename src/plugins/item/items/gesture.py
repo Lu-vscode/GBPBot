@@ -10,25 +10,23 @@
   状态：决斗平局即胜利。
 
 四件道具的状态互斥（持有任一其它手势状态时不可使用，使用同种道具
-刷新持续时长）。决斗双方出拳环节结束时经决斗事件服务在 settling
-事件中判定：单方状态触发时该方获胜（改写决斗判定），双方状态同时
-触发（抵消）或都不触发时按正常规则；结算文案按触发情况在默认结算
-消息前拼接——获胜方靠状态才获胜时插入「（<拥有者> 使用了 <道具>）」，
-双方状态抵消导致平局时插入「（<拥有者1> 的 <道具1> 与 <拥有者2>
-的 <道具2> 抵消了）」，其它道具接管结算时不插入。
+刷新持续时长）。判定经决斗手势服务（DuelGestureService）注册的单组
+规则完成（不订阅 settling 事件、不改写胜负）：单方状态触发时该组
+手势判该方胜（无论基础猜拳规则如何），双方状态同时触发（抵消）或
+都不触发时交回基础规则；结算文案随判定结果给出——获胜方靠状态才
+获胜时插入「（<拥有者> 使用了 <道具>）」，双方状态抵消导致平局时
+插入「（<拥有者1> 的 <道具1> 与 <拥有者2> 的 <道具2> 抵消了）」。
 
-本模块还对外提供手势效果的公共判定接口（GestureEffect、held_effect、
-effect_triggered、micro_result），供需要多个手势的道具模块（如
-「强运」luck.py）逐手势复用状态触发规则；一方发送多个手势的决斗不
-在本模块的 settling 判定范围内（逐手势判定与聚合由对应道具模块负责）。
+单组规则对任意一组手势生效（包括「强运」等道具逐组复用的判定），
+本模块不再向其它道具模块导出判定接口。
 """
 
 from dataclasses import dataclass
 
 from src.plugins._shared.services import (
-    DuelEvent,
-    DuelEventKind,
-    DuelEventService,
+    DuelGesturePairContext,
+    DuelGesturePairVerdict,
+    DuelGestureService,
     require_service,
 )
 from src.plugins.item._framework import (
@@ -50,12 +48,13 @@ _PAPER = 1
 _SCISSORS = 2
 _ROCK = 3
 
-# 正常规则的胜负判定：(挑战者手势, 接受者手势) 在此集合中表示挑战者胜
-_WINNING_GESTURES = frozenset({(1, 3), (2, 1), (3, 2)})
+# 判定规则的优先级与显示名：优先级取本组道具的品质值
+_RULE_PRIORITY = Quality.GREEN
+_RULE_NAME = "121~124 特殊手势"
 
-# 决斗事件服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗手势服务（由决斗插件提供；_framework 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
-_event_service = require_service(DuelEventService)
+_gesture_service = require_service(DuelGestureService)
 
 
 @dataclass(frozen=True)
@@ -159,64 +158,6 @@ def _held_gesture_meta(group_id: int, user_id: int) -> _GestureItem | None:
     return None
 
 
-@dataclass(frozen=True)
-class GestureEffect:
-    """成员身上一个手势状态的效果（供跨模块判定使用）。"""
-
-    gesture: int | None
-    """触发状态的手势值（1 布、2 剪刀、3 石头）；None 表示「破平」
-    状态（平局时触发）。"""
-
-
-def held_effect(group_id: int, user_id: int) -> GestureEffect | None:
-    """返回成员身上本组道具产生的有效状态效果，无此类状态时返回 None。"""
-    meta = _held_gesture_meta(group_id, user_id)
-    if meta is None:
-        return None
-    return GestureEffect(gesture=meta.gesture)
-
-
-def effect_triggered(effect: GestureEffect | None, gesture: int, *, draw: bool) -> bool:
-    """判断一方的状态效果是否触发（无状态时返回 False）。
-
-    石头/剪刀/布状态在出了对应手势时触发；破平状态在双方手势相同
-    （draw 为 True）时触发。
-    """
-    if effect is None:
-        return False
-    if effect.gesture is None:
-        return draw
-    return effect.gesture == gesture
-
-
-def micro_result(
-    group_id: int,
-    actor_id: int,
-    actor_gesture: int,
-    opponent_id: int,
-    opponent_gesture: int,
-) -> int:
-    """按猜拳规则与双方手势状态判定单组手势的胜负。
-
-    返回 1（actor 胜）、0（平局）、-1（actor 负）：单方状态触发时
-    该方获胜（无论正常判定如何）；双方都触发（抵消）或都不触发时
-    按正常规则（双方手势相同时为平局）。供需要多个手势的道具
-    （如“强运”）逐手势判定后聚合。
-    """
-    actor_effect = held_effect(group_id, actor_id)
-    opponent_effect = held_effect(group_id, opponent_id)
-    draw = actor_gesture == opponent_gesture
-    actor_triggered = effect_triggered(actor_effect, actor_gesture, draw=draw)
-    opponent_triggered = effect_triggered(opponent_effect, opponent_gesture, draw=draw)
-    if actor_triggered != opponent_triggered:
-        return 1 if actor_triggered else -1
-    if draw:
-        return 0
-    if (actor_gesture, opponent_gesture) in _WINNING_GESTURES:
-        return 1
-    return -1
-
-
 def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：不持有本组其它手势状态（同种状态可再次使用以刷新
     持续时长）；返回错误文案时本次不消耗。"""
@@ -241,29 +182,19 @@ async def _handle_use(context: ItemUseContext) -> None:
     )
 
 
-def _normal_winner(
-    challenger_gesture: int,
-    opponent_gesture: int,
-    challenger_id: int,
-    opponent_id: int,
-) -> int | None:
-    """按正常规则判定胜负，返回胜者 QQ 号（平局时返回 None）。"""
-    if challenger_gesture == opponent_gesture:
-        return None
-    if (challenger_gesture, opponent_gesture) in _WINNING_GESTURES:
-        return challenger_id
-    return opponent_id
+def _triggered_meta(
+    meta: _GestureItem | None, gesture: int, *, draw: bool
+) -> _GestureItem | None:
+    """返回因本次手势而触发的状态信息（未持有状态或未触发时为 None）。
 
-
-def _triggered(meta: _GestureItem | None, gesture: int, *, draw: bool) -> bool:
-    """判断一方的状态效果是否触发（无状态时返回 False）。
-
-    石头/剪刀/布状态在出了对应手势时触发；破平状态在正常规则平局
-    （双方手势相同）时触发。
+    石头/剪刀/布状态在出了对应手势时触发；破平状态在双方手势相同
+    （draw 为 True）时触发。
     """
     if meta is None:
-        return False
-    return effect_triggered(GestureEffect(gesture=meta.gesture), gesture, draw=draw)
+        return None
+    if meta.gesture is None:
+        return meta if draw else None
+    return meta if meta.gesture == gesture else None
 
 
 def _used_prefix(name: str, label: str) -> str:
@@ -276,64 +207,51 @@ def _canceled_prefix(name_a: str, label_a: str, name_b: str, label_b: str) -> st
     return f"（{name_a} 的 {label_a} 与 {name_b} 的 {label_b} 抵消了）\n"
 
 
-async def _on_duel_event(event: DuelEvent) -> None:
-    """决斗事件处理：双方出拳环节结束时按手势状态改写胜负判定，
-    并在默认结算消息前拼接状态效果文案。
+def _pair_rule(context: DuelGesturePairContext) -> DuelGesturePairVerdict | None:
+    """单组手势判定规则：按双方的手势状态判定一组手势的胜负与文案。
 
-    仅处理双方都只出一个手势的决斗；一方需要多个手势时（如强运
-    效果）逐手势判定与聚合由对应道具模块负责（见 luck.py）。
+    单方状态触发时该组手势判该方胜（无论基础猜拳规则如何）；双方都
+    触发且基础判定分出胜负时交回基础规则，都不触发时同样交回基础规则
+    （返回 None）。结算文案：获胜方靠状态才获胜（基础判定中该方不会
+    获胜）时插入「（<拥有者> 使用了 <道具>）」，双方状态抵消且基础判定
+    为平局时插入抵消文案。
     """
-    if event.kind is not DuelEventKind.SETTLING:
-        return
-    challenger_gestures = event.challenger_gestures
-    opponent_gestures = event.opponent_gestures
-    if len(challenger_gestures) != 1 or len(opponent_gestures) != 1:
-        # 空手势不可达（settling 在双方完成出手后发布）；多个手势的
-        # 决斗由强运道具聚合判定
-        return
-    challenger_gesture = challenger_gestures[0]
-    opponent_gesture = opponent_gestures[0]
-    meta_challenger = _held_gesture_meta(event.group_id, event.challenger_id)
-    meta_opponent = _held_gesture_meta(event.group_id, event.opponent_id)
-    normal_winner = _normal_winner(
-        challenger_gesture,
-        opponent_gesture,
-        event.challenger_id,
-        event.opponent_id,
-    )
-    normal_draw = normal_winner is None
-    challenger_triggered = _triggered(
-        meta_challenger, challenger_gesture, draw=normal_draw
-    )
-    opponent_triggered = _triggered(meta_opponent, opponent_gesture, draw=normal_draw)
-    # 单方状态触发时该方获胜（无论正常判定如何）；双方都触发（抵消）
-    # 或都不触发时保持正常判定
-    if challenger_triggered and not opponent_triggered:
-        event.winner_id = event.challenger_id
-        event.loser_id = event.opponent_id
-    elif opponent_triggered and not challenger_triggered:
-        event.winner_id = event.opponent_id
-        event.loser_id = event.challenger_id
-    # 结算文案：获胜方靠状态才获胜（正常判定中该方不会获胜）时插入
-    # "（<拥有者> 使用了 <道具>）"；双方状态抵消（都触发）且抵消导致
-    # 平局时插入抵消文案；其余情况（状态未改变判定等）不插入
-    label_challenger = meta_challenger.label if meta_challenger is not None else ""
-    label_opponent = meta_opponent.label if meta_opponent is not None else ""
-    if challenger_triggered and opponent_triggered:
-        if normal_draw:
-            event.result_prefix = _canceled_prefix(
-                event.challenger_name,
-                label_challenger,
-                event.opponent_name,
-                label_opponent,
-            )
-    elif challenger_triggered and normal_winner != event.challenger_id:
-        event.result_prefix = _used_prefix(event.challenger_name, label_challenger)
-    elif opponent_triggered and normal_winner != event.opponent_id:
-        event.result_prefix = _used_prefix(event.opponent_name, label_opponent)
+    actor_meta = _held_gesture_meta(context.group_id, context.actor_id)
+    opponent_meta = _held_gesture_meta(context.group_id, context.opponent_id)
+    draw = context.actor_gesture == context.opponent_gesture
+    actor_state = _triggered_meta(actor_meta, context.actor_gesture, draw=draw)
+    opponent_state = _triggered_meta(opponent_meta, context.opponent_gesture, draw=draw)
+    if actor_state is not None and opponent_state is not None:
+        if not draw:
+            # 双方状态抵消但基础规则仍能分出胜负：保持基础判定
+            return None
+        return DuelGesturePairVerdict(
+            outcome=0,
+            detail=_canceled_prefix(
+                context.actor_name,
+                actor_state.label,
+                context.opponent_name,
+                opponent_state.label,
+            ),
+        )
+    if actor_state is not None:
+        detail = (
+            None
+            if context.base_outcome == 1
+            else _used_prefix(context.actor_name, actor_state.label)
+        )
+        return DuelGesturePairVerdict(outcome=1, detail=detail)
+    if opponent_state is not None:
+        detail = (
+            None
+            if context.base_outcome == -1
+            else _used_prefix(context.opponent_name, opponent_state.label)
+        )
+        return DuelGesturePairVerdict(outcome=-1, detail=detail)
+    return None
 
 
-_event_service.subscribe(_on_duel_event)
+_gesture_service.register_pair_rule(_RULE_PRIORITY, _RULE_NAME, _pair_rule)
 
 
 def _register_gesture_items() -> None:

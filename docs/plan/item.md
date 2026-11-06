@@ -205,7 +205,7 @@ class ItemUseContext:
 | `accepted` | 对方接受（含机器人掷骰接受）后 | 无 |
 | `rejected` | 拒绝（含机器人掷骰拒绝）后 | 无 |
 | `gesture` | 记录任一方猜拳手势后 | 无 |
-| `settling` | 判定完成、结算分数前 | `multiplier`（点数加成）、`winner_id`/`loser_id`（可改写或改为平局） |
+| `settling` | 判定完成、结算分数前 | `multiplier`（点数加成）、`result_prefix`（追加到默认结算消息前）；`winner_id`/`loser_id` 只读 |
 | `settled` | 分数结算与结果播报完成后 | 无 |
 | `timeout` | 决斗超时认领移除后 | 无 |
 
@@ -214,16 +214,20 @@ class ItemUseContext:
 - `DuelSettleService`（新增）：`register_settler(priority, handler)`；settling 事件
   全部处理器完成后由决斗流程按优先级从高到低询问接管者，第一个返回 True 的
   接管本场结算（跳过默认分数结算与播报），其余接管者不再调用；全部返回 False
-  时走默认结算。接管者只读取已校正的最终胜负、不应再改写；抛异常按已接管处理，
+  时走默认结算。接管者只读取已判定出的胜负、不应再改写；抛异常按已接管处理，
   避免已产生的分数改变与默认结算叠加。720 魂迁（蓝色稀有 3）优先于 096
   布衣之怒（白色普通 1）
+- `DuelGestureService`（新增）：`register_pair_rule(priority, name, rule)` /
+  `register_effect(priority, name, judge, *, required=None)`；胜负判定集中在决斗
+  插件的判定引擎（基础猜拳 → 单组规则 → 整局效果），道具只注册规则、不再
+  在 settling 事件里改写胜负；整局效果同时声明所需手势数量（如「强运」）
 
 ### 7.2 行为保持
 
 - 所有现有文案、判定（含胜负手势表）、超时延迟播报、并发防重逻辑**不变**；
   仅将 `_send_text`/群昵称获取、截断等改为复用 `_shared/onebot.py`
-- `settling` 修改结果后的结算：校验参与者合法性，非法改写回退原判定并记 warning；
-  点数负数取 0；结果播报使用最终值
+- `settling` 处理器改写胜负会被还原并记 error（胜负只能经 `DuelGestureService`
+  判定规则或结算接管改变）；点数负数取 0；结果播报使用判定结果
 
 ## 8. sign 集成
 
@@ -280,4 +284,5 @@ BOT_LIST=[111111, 222222] # 共享配置：机器人名单（所有群通用，�
   （当前库存模型为"编号 → 数量"，框架已提供状态存储可扩展按实例跟踪）
 - Buff/永久型状态基础设施（§5.5）本次完成并测试，暂无示例道具使用
 - 道具消息中的群昵称截断长度与决斗共用共享配置 NICKNAME_MAX_LENGTH（默认 12）
-- 道具与道具间不互相影响；道具与 duel 的交互经 §7 服务，与其它插件经 `ItemService`
+- 道具与道具间不互相 import：跨道具的功能分类走框架标签（`ItemTag`、`has_tag`/
+  `items_with_tag`）；道具与 duel 的交互经 §7 服务，与其它插件经 `ItemService`

@@ -5,6 +5,10 @@
 由 items/__init__.py 自动发现导入，无需修改本文件。库存与状态的加载、
 保存经 _storage.py 完成，本模块维护内存数据并提供操作 API。
 
+道具的功能分类走标签轴（ItemTag）：道具在定义中声明自己的功能标签，
+其它道具经 has_tag/items_with_tag 按标签查询集合，不再从具体道具模块
+导出分类常量。
+
 本模块仅由道具插件包内（含道具模块）导入使用；跨插件交互（签到发放
 道具、诅咒自动处理）经 _shared/services.py 的 ItemService 进行。
 """
@@ -13,7 +17,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, StrEnum
 from typing import TYPE_CHECKING, Any
 
 from nonebot import logger
@@ -81,6 +85,18 @@ class ItemType(Enum):
     SPECIAL = "特殊型"
 
 
+class ItemTag(StrEnum):
+    """道具的功能标签：跨道具的功能分类（与展示用的 ItemType 无关）。
+
+    标签只声明道具“属于哪一类功能”，不涉及品质、展示与使用方式；
+    道具按需要声明多个标签，其它道具经 has_tag/items_with_tag 查询。
+    """
+
+    COPY = "复制型"
+    """效果为复制道具的道具；以“非复制道具”为使用条件的道具据此排除
+    （见 items/regain.py）。"""
+
+
 # 状态到期回调的类型：过期状态被清理时由主模块调用（参数见
 # ItemStateExpireContext）；字符串前向引用以摆脱定义顺序约束
 _StateExpireHandler = Callable[["ItemStateExpireContext"], Awaitable[None]]
@@ -114,6 +130,10 @@ class ItemDefinition:
 
     timing: str
     """使用时机（展示文本）。"""
+
+    tags: frozenset[ItemTag] = frozenset()
+    """功能标签（可多个）：供其它道具按功能查询道具集合，如复制型道具
+    声明 ItemTag.COPY 后可由「复得之轮」排除；不参与详情展示与品质校验。"""
 
     durability: str = "1/1"
     """耐久（展示文本，一般为"剩余耐久/总耐久"）。"""
@@ -572,6 +592,23 @@ def get_item(item_id: str) -> ItemDefinition | None:
 def iter_items() -> list[ItemDefinition]:
     """返回全部已注册道具（按编号升序）。"""
     return [_ITEMS[item_id] for item_id in sorted(_ITEMS)]
+
+
+def has_tag(item_id: str, tag: ItemTag) -> bool:
+    """判断道具是否带指定功能标签（未注册的编号返回 False）。"""
+    definition = _ITEMS.get(item_id)
+    return definition is not None and tag in definition.tags
+
+
+def items_with_tag(tag: ItemTag) -> frozenset[str]:
+    """返回带指定功能标签的全部道具编号（未声明该标签时为空集）。
+
+    由注册表实时汇总，新增道具只需在定义中声明标签即可被其它道具看见；
+    道具数量有限，查询开销可忽略。
+    """
+    return frozenset(
+        item_id for item_id, definition in _ITEMS.items() if tag in definition.tags
+    )
 
 
 def state_label(state: ItemState) -> str:

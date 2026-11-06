@@ -191,9 +191,12 @@ class DuelEventKind(StrEnum):
     发布一次）。"""
 
     SETTLING = "settling"
-    """判定完成、结算分数前触发；处理器可修改点数与胜负、读取双方手势
-    （challenger_gestures/opponent_gestures，按发送顺序）、设置默认结算
-    消息前缀（result_prefix，结算被接管时不使用）。"""
+    """判定完成、结算分数前触发；处理器可修改点数、读取双方手势
+    （challenger_gestures/opponent_gestures，按发送顺序）与判定结果
+    （winner_id/loser_id 只读）、追加默认结算消息前缀（result_prefix，
+    结算被接管时不使用）。胜负只能经手势服务（DuelGestureService）注册
+    的判定规则或结算接管（DuelSettleService）改变，直接改写
+    winner_id/loser_id 会被决斗插件还原并记录错误日志。"""
 
     SETTLED = "settled"
     """分数结算与结果播报完成后触发；结算被处理器接管时在接管处理器
@@ -258,15 +261,17 @@ class DuelEvent:
     （接管时默认的分数结算没有执行，分数可能被接管者自行改写）。"""
 
     result_prefix: str | None = None
-    """settling 事件中由处理器设置的前缀文本（如道具效果说明），默认结算
-    消息（胜负/平局播报）会将其拼接在消息最前；结算被接管（claimed）时
+    """结算消息前缀文本（如道具效果说明），默认结算消息（胜负/平局播报）
+    会将其拼接在消息最前；判定规则（见 DuelGestureService）给出的说明是
+    settling 事件中的初始值，处理器可在其后追加；结算被接管（claimed）时
     跳过了默认播报，前缀不被使用。"""
 
     winner_id: int | None = None
-    """settling/settled 事件的胜者 QQ 号（与 loser_id 同为 None 表示平局）。"""
+    """settling/settled 事件的胜者 QQ 号（与 loser_id 同为 None 表示平局）；
+    settling 事件中为只读的判定结果，改写会被决斗插件还原并记录错误日志。"""
 
     loser_id: int | None = None
-    """settling/settled 事件的负者 QQ 号。"""
+    """settling/settled 事件的负者 QQ 号（settling 事件中同样只读）。"""
 
     winner_name: str | None = None
     """settled 事件的胜者群昵称。"""
@@ -334,22 +339,150 @@ DuelGestureQuotaProvider = Callable[[int, int, int], int]
 在该场决斗中需要发送的猜拳表情数量（正整数）。"""
 
 
+@dataclass(frozen=True)
+class DuelGesturePairContext:
+    """一组手势判定的只读上下文（经 DuelGesturePairRule 交给规则）。"""
+
+    group_id: int
+    """决斗所在群号。"""
+
+    actor_id: int
+    """判定主体（结果是相对该成员的视角）的成员 QQ 号。"""
+
+    actor_name: str
+    """判定主体的群昵称（提供方已按显示规范截断）。"""
+
+    actor_gesture: int
+    """判定主体的手势（1 布、2 剪刀、3 石头）。"""
+
+    opponent_id: int
+    """对手的成员 QQ 号。"""
+
+    opponent_name: str
+    """对手的群昵称（提供方已按显示规范截断）。"""
+
+    opponent_gesture: int
+    """对手的手势（1 布、2 剪刀、3 石头）。"""
+
+    base_outcome: int
+    """基础猜拳规则的判定结果（相对判定主体）：1 胜、0 平、-1 负；
+    供规则仅在“自己的效果改变了基础判定”时给出结算说明。"""
+
+
+@dataclass(frozen=True)
+class DuelGesturePairVerdict:
+    """一组手势的判定结果。"""
+
+    outcome: int
+    """相对判定主体的结果：1 胜、0 平、-1 负。"""
+
+    detail: str | None = None
+    """结算消息前缀说明（如道具效果），仅当该组手势是整局的最终判定
+    依据时由决斗插件采用；None 表示无说明。"""
+
+
+DuelGesturePairRule = Callable[[DuelGesturePairContext], DuelGesturePairVerdict | None]
+"""单组手势判定规则：返回 None 表示本规则不裁决该组手势（交基础规则或
+其它规则）。规则须为纯函数、不产生副作用并保持快捷。"""
+
+DuelGesturePairOutcome = Callable[[int, int, int, int], DuelGesturePairVerdict]
+"""按已注册规则判定一组手势：接收 (判定主体 QQ, 其手势, 对手 QQ, 其手势)，
+返回判定结果。"""
+
+
+@dataclass(frozen=True)
+class DuelGestureSide:
+    """决斗一方的参与者与其手势记录。"""
+
+    user_id: int
+    """成员 QQ 号。"""
+
+    name: str
+    """该成员的群昵称（提供方已按显示规范截断）。"""
+
+    gestures: tuple[int, ...]
+    """该成员本次决斗的手势（1 布、2 剪刀、3 石头），按发送顺序。"""
+
+
+@dataclass(frozen=True)
+class DuelGestureContext:
+    """整局判定的只读上下文（经 DuelGestureJudge 交给手势效果）。"""
+
+    group_id: int
+    """决斗所在群号。"""
+
+    challenger: DuelGestureSide
+    """发起决斗的一方（含其手势）。"""
+
+    opponent: DuelGestureSide
+    """接受决斗的一方（含其手势）。"""
+
+    pair_outcome: DuelGesturePairOutcome
+    """按已注册的单组手势规则判定一组手势（含其它道具的单组效果修正
+    与基础规则），供多手势效果逐组复用单组判定。"""
+
+
+@dataclass(frozen=True)
+class DuelGestureVerdict:
+    """整局判定结果。"""
+
+    winner_id: int | None
+    """胜者 QQ 号（为本场决斗的参与方）；None 表示平局。"""
+
+    detail: str | None = None
+    """结算消息前缀说明（如道具效果），None 表示无。"""
+
+
+DuelGestureJudge = Callable[[DuelGestureContext], DuelGestureVerdict | None]
+"""整局判定规则（手势效果）：返回 None 表示本效果不裁决本场胜负。
+规则须为纯函数、不产生副作用并保持快捷。"""
+
+
 @runtime_checkable
-class DuelGestureQuotaService(Protocol):
-    """决斗手势配额服务（由猜拳决斗插件提供）。"""
+class DuelGestureService(Protocol):
+    """决斗手势服务（由猜拳决斗插件提供）。"""
 
-    def add_quota_provider(self, provider: DuelGestureQuotaProvider) -> None:
-        """注册手势配额提供者（同一提供者重复注册会被忽略）。
+    def register_pair_rule(
+        self, priority: int, name: str, rule: DuelGesturePairRule
+    ) -> None:
+        """注册单组手势判定规则（同一规则重复注册会被忽略）。
 
-        提供者用于决定一场决斗中成员需要发送几个猜拳表情（如道具
-        效果要求发送多个表情聚合胜负）：默认所有成员需要 1 个，注册
-        提供者后按提供者返回的数量提高（多个提供者取最大值，至少为
-        1）。所需数量在记录手势、就绪判定与机器人代发时动态计算；
-        返回非正整数的提供者会被忽略并记录警告，单个提供者抛出的异常
-        只记录日志、其结果被忽略；提供者应保持快捷。
+        规则在基础猜拳规则之上叠加：决斗判定一组手势时按优先级从高到
+        低询问全部规则，取得出结果（非 None）的最高优先级者；多条规则
+        给出不一致的结果时记录警告日志。未注册任何规则或规则全部放弃
+        时按基础猜拳规则判定。
 
         参数:
-            provider: 手势配额提供者。
+            priority: 优先级，数值越大越优先（建议使用道具品质值）。
+            name: 规则来源的显示名（如“121 原始力量”），用于日志。
+            rule: 单组手势判定规则。
+        """
+        ...
+
+    def register_effect(
+        self,
+        priority: int,
+        name: str,
+        judge: DuelGestureJudge,
+        *,
+        required: DuelGestureQuotaProvider | None = None,
+    ) -> None:
+        """注册整局判定效果（同一效果重复注册会被忽略）。
+
+        整局判定在单组判定之上先询问已注册的效果：决斗判定胜负时按优先
+        级从高到低询问全部效果，取得出结果（非 None）的最高优先级者，并
+        采用其结果与结算说明；多条效果给出不一致的结果时记录警告日志。
+        全部效果放弃时按单组判定与基础规则结算。
+
+        多手势与整局判定应成对注册（同一效果同时提供 required 与 judge）：
+        提高所需手势数量的效果必须能裁决多手势的胜负，未提供 required 的
+        效果不改变所需手势数量。
+
+        参数:
+            priority: 优先级，数值越大越优先（建议使用道具品质值）。
+            name: 效果来源的显示名（如“712 强运”），用于日志。
+            judge: 整局判定规则。
+            required: 所需手势数量提供者；None 表示不改变所需数量。
         """
         ...
 

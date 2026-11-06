@@ -6,24 +6,17 @@
 只读快照。状态变更函数（记录/认领手势、移除决斗）供包内其它模块在
 同步段（无 await）调用，用于防并发事件重复记录、重复结算。
 
-决斗中成员所需的猜拳表情数量默认为 1，可由手势配额提供者（如道具
-的“强运”效果）提高：提供者经决斗手势配额服务
-（DuelGestureQuotaService）注册，所需数量在记录手势与就绪判定时
-动态计算，多个提供者取最大值；被挑衅决斗中由机器人代替出手的一方
-同样按该数量记录手势。
+决斗中成员所需的猜拳表情数量默认为 1，可由整局判定效果（如道具的
+“强运”效果）提高：效果经决斗手势服务（DuelGestureService）注册判定与
+所需数量，所需数量在记录手势与就绪判定时动态计算（见 _judgement）。
 """
 
 import time
 from dataclasses import dataclass, field
 
-from nonebot import logger
-
-from src.plugins._shared.services import (
-    DuelGestureQuotaProvider,
-    DuelSnapshot,
-    DuelStateService,
-)
+from src.plugins._shared.services import DuelSnapshot, DuelStateService
 from src.plugins.duel._config import DURATION_SECONDS
+from src.plugins.duel._judgement import required_gestures
 
 
 @dataclass(eq=False)
@@ -72,39 +65,6 @@ class Duel:
 
 # 进行中的决斗，按创建顺序排列（同一成员多场决斗时优先满足旧的）
 duels: list[Duel] = []
-
-# 手势配额提供者与捕获集合：提供者经决斗手势配额服务
-# （DuelGestureQuotaService）注册，用于提高成员在一场决斗中需要发送
-# 的猜拳表情数量；单个提供者抛出的异常只记录错误日志、其结果被忽略
-_QUOTA_PROVIDER_ERRORS = (Exception,)
-_quota_providers: list[DuelGestureQuotaProvider] = []
-
-
-def add_gesture_quota_provider(provider: DuelGestureQuotaProvider) -> None:
-    """注册手势配额提供者（同一提供者重复注册会被忽略）。"""
-    if provider not in _quota_providers:
-        _quota_providers.append(provider)
-
-
-def required_gestures(group_id: int, user_id: int, opponent_id: int) -> int:
-    """返回成员在该场决斗中需要发送的猜拳表情数量（至少 1）。
-
-    默认需要 1 个，注册提供者后按提供者返回的数量提高（多个提供者
-    取最大值）；返回非正整数的提供者被忽略并记录警告，单个提供者
-    抛出的异常只记录错误日志、其结果被忽略。
-    """
-    required = 1
-    for provider in tuple(_quota_providers):
-        try:
-            value = provider(group_id, user_id, opponent_id)
-        except _QUOTA_PROVIDER_ERRORS as exc:
-            logger.error(f"手势配额提供者计算所需数量时出错：{exc}")
-            continue
-        if not isinstance(value, int) or value < 1:
-            logger.warning(f"手势配额提供者返回了无效的数量 {value!r}，已忽略")
-            continue
-        required = max(required, value)
-    return required
 
 
 def _opponent_of(duel: Duel, user_id: int) -> int:

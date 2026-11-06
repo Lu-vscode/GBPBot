@@ -5,10 +5,14 @@
 品质不高于该复制道具品质的道具；由备注可知复制道具自身也允许（先消耗
 一件再复制一件，数量不变）。六件道具的差异仅在品质与名称（颜色后缀）：
 编号越大品质越低、可复制的品质上限越低。
+
+六件道具均声明 ItemTag.COPY 标签，供其它道具按“非复制道具”为条件
+排除（见 _framework.items_with_tag），无需从本模块导出编号集合。
 """
 
 from src.plugins.item._framework import (
     ItemDefinition,
+    ItemTag,
     ItemType,
     ItemUseContext,
     Quality,
@@ -29,9 +33,6 @@ _COPY_ITEMS = (
     ("104", Quality.WHITE, "复制（白）"),
     ("105", Quality.GRAY, "复制（灰）"),
 )
-
-# 本组道具的编号集合：供其它道具判定「复制道具」（如「复得之轮」排除）
-COPY_ITEM_IDS = frozenset(item_id for item_id, _, _ in _COPY_ITEMS)
 
 
 def _can_use(context: ItemUseContext) -> str | None:
@@ -73,6 +74,7 @@ def _register_copy_items() -> None:
                 name=name,
                 quality=quality,
                 types=(ItemType.OPTIONAL,),
+                tags=frozenset({ItemTag.COPY}),
                 description="复制道具。",
                 effect=(
                     f'使用指令"/item.use {item_id} <需要复制的道具编号>"'
