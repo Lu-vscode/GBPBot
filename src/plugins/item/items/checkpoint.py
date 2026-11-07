@@ -20,9 +20,10 @@ from nonebot.rule import is_type
 from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, sender_display_name
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -227,7 +228,7 @@ register_item(
         item_id=_ITEM_ID,
         name="存档",
         quality=Quality.PURPLE,
-        types=(ItemType.PERMANENT,),
+        kind=ItemKind.PERMANENT,
         description="存档当前决斗分数",
         effect=(
             "使用后获得永久状态“存档点”。\n"
@@ -237,10 +238,10 @@ register_item(
             "份数归零时该“存档点”消失。\n"
             "同一分数的“存档点”可以叠加份数。"
         ),
-        condition="无",
-        timing="任意",
         note="为什么是一次性的？",
-        handle_use=_handle_use,
-        state_labels=((_STATE_KEY_PREFIX, "存档点"),),
+        labels=((_STATE_KEY_PREFIX, "存档点"),),
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

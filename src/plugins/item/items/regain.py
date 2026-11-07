@@ -23,10 +23,11 @@ from datetime import UTC, datetime
 from nonebot import logger
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
     ItemTag,
-    ItemType,
     ItemUseContext,
     Quality,
     acquire_curse,
@@ -230,7 +231,7 @@ register_item(
         item_id=_ITEM_ID,
         name="复得之轮",
         quality=Quality.GOLD,
-        types=(ItemType.COMPOSITE,),
+        kind=ItemKind.COMPOSITE,
         description="绝对的倒转，由此而生的数值，教会你爱的是……",
         effect=(
             f'使用指令"/item.use {_ITEM_ID} <n>"获得持续n天的“复得”状态：'
@@ -239,12 +240,13 @@ register_item(
             "（概率与签到相同），否则获得一个随机黑色诅咒道具，冷却时间1小时。"
         ),
         condition="没有“复得”状态",
-        timing="任意",
         note="每一份命运的馈赠，早已暗中标好了价格。",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
-        state_labels=((_STATE_KEY, "复得"),),
+        labels=((_STATE_KEY, "复得"),),
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )
 

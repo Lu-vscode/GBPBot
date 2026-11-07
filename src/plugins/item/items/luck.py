@@ -24,9 +24,10 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -196,16 +197,16 @@ register_item(
         item_id=_ITEM_ID,
         name="强运",
         quality=Quality.BLUE,
-        types=(ItemType.BUFF,),
+        kind=ItemKind.BUFF,
         description="我听见了「强运」的回响",
         effect=(
             "使用后获得持续3小时的“强运”状态：决斗中你需发送3个猜拳表情，"
             "只要有1个表情获胜则你胜利；否则只要有1个表情平局则平局；"
             "否则你失败。"
         ),
-        condition="无",
-        timing="任意",
         note="运气不够，次数来凑",
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

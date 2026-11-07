@@ -26,8 +26,9 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
@@ -210,7 +211,7 @@ register_item(
         item_id=_ITEM_ID,
         name="魂迁",
         quality=Quality.BLUE,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="我听见了「魂迁」的回响",
         effect=(
             f'使用"/item.use {_ITEM_ID} @使用对象"发动魂迁，'
@@ -220,7 +221,9 @@ register_item(
         timing="决斗发起后结算前",
         note="我叫章晨则，是名律师。",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )

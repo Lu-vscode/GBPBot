@@ -6,16 +6,18 @@
 
 耐久型道具的耗损副本同样可以强塞：转移时把最早开始耗损的副本（即
 详情中显示剩余耐久的那一件）连同剩余耐久一并转给使用对象，见
-_durability.move_damaged_instance。
+item/_durability.py 的 move_damaged_instance。
 """
 
 from nonebot import logger
 
 from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
 from src.plugins._shared.onebot import member_display_name
+from src.plugins.item._durability import move_damaged_instance
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
@@ -25,10 +27,6 @@ from src.plugins.item._framework import (
     quality_label,
     register_item,
     remove_item,
-)
-from src.plugins.item.items._durability import (
-    durable_state_key,
-    move_damaged_instance,
 )
 
 # 道具编号与可强塞的品质上限
@@ -99,16 +97,10 @@ async def _handle_use(context: ItemUseContext) -> None:
         await context.send(f"使用失败：道具状态异常，{context.item.label} 已退还。")
         return
     add_item(context.group_id, target_id, target.item_id)
-    remaining = None
-    state_key = durable_state_key(target.item_id)
-    if state_key is not None:
-        remaining = move_damaged_instance(
-            context.group_id,
-            context.user_id,
-            target_id,
-            item_id=target.item_id,
-            state_key=state_key,
-        )
+    # 耐久型道具的耗损副本带着剩余耐久一并转移（非耐久型返回 None）
+    remaining = move_damaged_instance(
+        context.group_id, context.user_id, target_id, target.item_id
+    )
     target_name = await member_display_name(
         context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
     )
@@ -126,17 +118,17 @@ register_item(
         item_id=_ITEM_ID,
         name="强塞",
         quality=Quality.GRAY,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="强行把自己的道具塞给别人",
         effect=(
             f'使用"/item.use {_ITEM_ID} @使用对象 <道具编号>"使自己失去指定的'
             f"品质不高于{quality_label(_MAX_QUALITY)}的道具，使用对象获得该道具。"
         ),
-        condition="无",
-        timing="任意",
         note="为什么会有人白送都不要？",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )

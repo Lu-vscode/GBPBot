@@ -4,8 +4,9 @@
 """
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     register_item,
@@ -23,12 +24,12 @@ register_item(
         item_id="111",
         name="+1",
         quality=Quality.GRAY,
-        types=(ItemType.CONSUMABLE,),
+        kind=ItemKind.CONSUMABLE,
         description="+1",
         effect="决斗分数+1。",
-        condition="无",
-        timing="任意",
         note="+1",
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

@@ -17,9 +17,9 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -86,13 +86,13 @@ register_item(
         item_id=_ITEM_ID,
         name="Not Found",
         quality=Quality.BLACK_CURSE,
-        types=(ItemType.CURSE,),
         description="404 Not Found",
         effect="使用后获得持续1小时的“404”状态，无法发起/被发起决斗。",
-        condition="无",
         timing="自动使用",
         note="404 Not Found",
-        handle_use=_handle_use,
-        state_labels=((_STATE_KEY, "404"),),
+        labels=((_STATE_KEY, "404"),),
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

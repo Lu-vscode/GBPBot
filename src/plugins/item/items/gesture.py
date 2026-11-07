@@ -30,9 +30,10 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -262,15 +263,16 @@ def _register_gesture_items() -> None:
                 item_id=meta.item_id,
                 name=meta.name,
                 quality=Quality.GREEN,
-                types=(ItemType.BUFF,),
+                kind=ItemKind.BUFF,
                 description=meta.description,
                 effect=meta.effect,
                 condition=meta.condition,
-                timing="任意",
                 note=meta.note,
-                can_use=_can_use,
-                handle_use=_handle_use,
-                state_labels=((meta.state_key, meta.state_label),),
+                labels=((meta.state_key, meta.state_label),),
+                behavior=ItemBehavior(
+                    check=_can_use,
+                    use=_handle_use,
+                ),
             )
         )
 

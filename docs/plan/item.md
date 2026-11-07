@@ -32,7 +32,8 @@ src/plugins/
 ├── duel.py           # 重构：注册 3 项服务、发布 8 类事件、复用 _shared 工具与配置
 ├── item/             # 新增：道具插件包（NoneBot 包插件，模块名 src.plugins.item）
 │   ├── __init__.py   # 主模块：配置、存储、指令、抽取/合成/交换/使用/诅咒流程、服务注册、定时清理
-│   ├── _framework.py # 道具定义/注册表、品质与类型枚举、使用上下文、状态 API、抽取代数
+│   ├── _framework.py # 道具定义/注册表、品质与分类枚举、功能标签、使用上下文、状态 API、抽取代数
+│   ├── _durability.py # 耐久型道具的公共逻辑（副本耗损、可交易数量、详情耐久、行为块工厂）
 │   ├── _storage.py   # inventory.json 与 states.json 的加载/保存
 │   └── items/
 │       ├── __init__.py  # 自动发现并导入本包下所有道具模块
@@ -63,42 +64,57 @@ src/plugins/
 
 ## 5. 道具框架（`_framework.py`）
 
-### 5.1 品质与类型
+### 5.1 品质、分类与标签
 
 - `Quality(IntEnum)`：`BLACK_CURSE=-1, GRAY=0, WHITE=1, GREEN=2, BLUE=3, PURPLE=4, GOLD=5`
   （数值用于合成 ±1/±2 运算与"品质由高到低"排序）
 - 品质显示名：黑色诅咒 / 灰色垃圾 / 白色普通 / 绿色精良 / 蓝色稀有 / 紫色史诗 / 金色传说
-- `ItemType(Enum)`：消耗型 / 诅咒型 / Buff型 / 永久型 / 耐久型 / 可选型 / 复合型 / 特殊型
+- `ItemKind(Enum)`（展示分类，单值、互斥，用于详情与分类统计）：消耗型 / 诅咒型 / Buff型 /
+  永久型 / 可选型 / 复合型；诅咒型可由黑色诅咒品质派生，该类道具可省略 `kind`
+- `ItemTag(StrEnum)`（功能标签，可多值，只记录"具备什么机制"，用于 `has_tag`/`items_with_tag`
+  查询）：复制型
+- 分类与标签是两条互不相交的轴：分类回答"它是什么"，标签回答"它具备什么机制"，
+  展示与统计只看分类，跨道具查询只看标签
 
 ### 5.2 道具定义与注册
 
 ```python
 @dataclass(frozen=True)
+class ItemBehavior:  # 行为钩子（可选；纯展示道具不需要）
+    check: Callable[[ItemUseContext], str | None] | None = None  # 返回错误文案即不可用
+    use: Callable[[ItemUseContext], Awaitable[None]] | None = None
+    consume: Callable[[ItemUseContext], bool] | None = None  # 自定义消耗方式（耐久型等）
+    transferable: Callable[[int, int, str], int] | None = None  # 可交换副本数（群、成员、道具）
+    expire: Callable[[ItemStateExpireContext], Awaitable[None]] | None = None  # 状态到期
+    durability_text: Callable[[int, int, str], str] | None = None  # 动态耐久（群、成员、道具）
+
+
+@dataclass(frozen=True)
 class ItemDefinition:
     item_id: str  # 三位数字字符串，如 "111"；注册时必须提供、不允许留空
     name: str  # 名称，如 "+1"
     quality: Quality
-    types: tuple[ItemType, ...]
     description: str  # 介绍
     effect: str  # 功能
-    condition: str  # 使用条件（展示）
-    timing: str  # 使用时机（展示）
+    kind: ItemKind | None = None  # 展示分类；None 表示由品质派生（仅黑色诅咒）
+    tags: Collection[ItemTag] = ()  # 功能标签（注册时归一化为 frozenset）
+    condition: str | None = None  # 使用条件（展示）；None 显示“无”
+    timing: str | None = None  # 使用时机（展示）；None 显示“任意”
+    note: str = ""  # 备注（空则不显示备注行）
     durability: str = "1/1"  # 耐久展示文本
-    note: str = ""  # 备注
     accepts_args: bool = False  # /item.use 是否接受额外参数
-    can_use: Callable[[ItemUseContext], str | None] | None = (
-        None  # 返回错误文案即不可用
-    )
-    handle_use: Callable[[ItemUseContext], Awaitable[None]] | None = None
+    labels: tuple[tuple[str, str], ...] = ()  # 本道具产生状态的显示名
+    behavior: ItemBehavior | None = None  # 行为钩子
 ```
 
-注册规则（`register_item(definition: ItemDefinition) -> ItemDefinition`，接收完整定义对象并返回，
-导入期执行，发现开发错误时抛 `ValueError`）：
+注册规则（`register_item(definition: ItemDefinition) -> ItemDefinition` 注册单件；
+`register_items(*definitions)` 批量注册、等价于逐件注册。导入期执行，发现开发错误时抛 `ValueError`）：
 
 - 编号必须为三位数字字符串（000~999）且不允许留空：编号由道具开发时指定，
   设计未指定时由开发 agent 在开发时从 100 起向上寻找可用编号并写入代码（000~099 保留）
-- 编号留空/重复、黑/咒不一致（品质为黑色诅咒 ⟺ 类型含诅咒型）→ 注册失败：
-  由 items 加载器记录 warning 并忽略该道具，不影响其它道具与插件包加载
+- 编号留空/重复、黑/咒不一致（品质为黑色诅咒 ⟺ 分类为诅咒型；非黑色诅咒道具
+  未声明 `kind` 时无法派生分类）→ 注册失败：由 items 加载器记录 warning 并忽略该道具，
+  不影响其它道具与插件包加载
 - 道具模块由 `items/__init__.py` 经 `pkgutil.iter_modules` 自动发现导入，新增道具文件即自动注册
 
 ### 5.3 使用上下文（`ItemUseContext`）
@@ -128,9 +144,22 @@ class ItemUseContext:
 - `add_state(group_id, user_id, *, state: ItemState, duration_seconds=None)` 新增/覆盖并落盘
   （`state` 提供状态键、来源道具与附加数据，`expires_at` 由本函数按 `duration_seconds`
   计算（传入值不使用），`None` 表示永久）
-- `get_state` / `remove_state` / `list_states`：读取时惰性清理过期状态
+- `get_state` / `remove_state` / `list_states`：读取时跳过已过期状态但不删除，
+  过期条目统一交由定时清理分发到期效果（见 `ItemBehavior.expire`）
 - `purge_expired_states()`：定时清理
 - 状态按群隔离；道具模块可据此实现"状态期间的特殊效果/限定指令"（如经行内判定 `get_state`）
+
+### 5.6 耐久型道具（`_durability.py`）
+
+- 数据模型：库存数量 + 耗损状态 `<道具编号>.durability`（附加数据 `remaining`
+  为各副本剩余耐久列表，按开始耗损的先后排列）；未使用过的副本是全新的
+- `durable_behavior(*, total, display_total=None, check=None, use=None)`：返回已接好
+  消耗、可交易数量与详情耐久的行为块，道具模块只需一行；行为块不含具体道具，
+  同组道具可共用一个实例（如保险 132~136）
+- 消耗：优先对已耗损副本扣 1 点耐久（归零时该副本从库存移除），没有耗损副本时
+  开始耗损一件全新副本；可交易数量只计全新副本（耗损副本不能交换/合成）
+- `move_damaged_instance(group_id, from_user, to_user, item_id)`：把最早开始耗损的
+  副本连同剩余耐久转给另一名成员（供「强塞」127 等转移类道具使用）
 
 ## 6. 指令与流程
 
@@ -153,7 +182,7 @@ class ItemUseContext:
 ### 6.3 诅咒获得流程（`handle_acquisition`）
 
 对黑色诅咒：先以合并转发发送一条消息展示完整信息（单节点，节点名"道具详情"，
-前缀"你获得了黑色诅咒道具：110 -1！"），随后转交给道具模块的 `handle_use` 自动使用
+前缀"你获得了黑色诅咒道具：110 -1！"），随后转交给道具的行为块 `use` 自动使用
 （110 发"黑色诅咒生效，你的决斗分数-1。"）。
 普通道具该方法为空操作（供 sign 无差别调用）。
 
@@ -184,7 +213,7 @@ class ItemUseContext:
 ### 6.6 使用：`/item.use <编号> [参数]`
 
 - 校验：参数格式（三位数字）、道具存在、自己拥有；非"可选型"道具附带额外参数时报用法错误
-- 消费一件库存后调用模块 `can_use`（可返回错误文案阻止，此时不消费）与 `handle_use`
+- 先调用行为块 `check`（返回错误文案则阻止，此时不消费），消耗一件库存后调用 `use`
   （成功消息由道具模块自行发送）
 - 黑色诅咒无法拥有，正常不会出现在自己的道具中
 
@@ -280,8 +309,8 @@ BOT_LIST=[111111, 222222] # 共享配置：机器人名单（所有群通用，�
 
 ## 12. 边界与限制（记录备忘）
 
-- 耐久型的"使用过的耐久型道具不能合成/交换"细节随首个耐久型道具实现时落地
-  （当前库存模型为"编号 → 数量"，框架已提供状态存储可扩展按实例跟踪）
+- 耐久型道具按"库存数量 + 耗损状态"跟踪副本：未使用过的副本可交换/合成，
+  已耗损的副本不可（见 §5.6）
 - Buff/永久型状态基础设施（§5.5）本次完成并测试，暂无示例道具使用
 - 道具消息中的群昵称截断长度与决斗共用共享配置 NICKNAME_MAX_LENGTH（默认 12）
 - 道具与道具间不互相 import：跨道具的功能分类走框架标签（`ItemTag`、`has_tag`/

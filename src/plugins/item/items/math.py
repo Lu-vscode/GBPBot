@@ -27,10 +27,11 @@ from nonebot.rule import is_type
 from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, truncate_name
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
     ItemStateExpireContext,
-    ItemType,
     ItemUseContext,
     Quality,
     add_item,
@@ -228,18 +229,18 @@ register_item(
         item_id=_ITEM_ID,
         name="挑戰數學有趣的難題",
         quality=Quality.BLACK_CURSE,
-        types=(ItemType.CURSE,),
         description="花點時間挑戰數學有趣的難題",
         effect=(
             "Bot会发送随机高等数学难题，答案一定是整数，限时10min。"
             '在规定时间内使用"/item.250.answer <答案>"回答，'
             "回答正确即可解除诅咒，回答错误或超时决斗分数直接归零。"
         ),
-        condition="无",
         timing="自动使用",
         note="發自我的手機",
-        handle_use=_handle_use,
-        handle_state_expire=_handle_state_expire,
+        behavior=ItemBehavior(
+            use=_handle_use,
+            expire=_handle_state_expire,
+        ),
     )
 )
 
@@ -248,12 +249,12 @@ register_item(
         item_id=_WATCH_ITEM_ID,
         name="華為手錶",
         quality=Quality.GRAY,
-        types=(ItemType.CONSUMABLE,),
+        kind=ItemKind.CONSUMABLE,
         description="告诉学生們，去修birkar的課，交論文，得分最高的，獎一个华为手表。",
         effect="使用后bot会告诉你当前时间。",
-        condition="无",
-        timing="任意",
         note="發自我的手機",
-        handle_use=_handle_watch_use,
+        behavior=ItemBehavior(
+            use=_handle_watch_use,
+        ),
     )
 )

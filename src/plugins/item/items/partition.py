@@ -21,9 +21,10 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -182,7 +183,7 @@ register_item(
         item_id=_ITEM_ID,
         name="隔断",
         quality=Quality.GRAY,
-        types=(ItemType.COMPOSITE,),
+        kind=ItemKind.COMPOSITE,
         description="我听见了「隔断」的回响",
         effect=(
             f'使用"/item.use {_ITEM_ID} @成员"使自己与被 @ 成员获得持续'
@@ -191,10 +192,11 @@ register_item(
             "发起决斗。"
         ),
         condition="自己和使用对象不具有「隔断」状态",
-        timing="任意",
         note="可以对自己使用",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )

@@ -923,10 +923,11 @@ async def _cleanup_items() -> None:
         logger.debug(f"已清理 {len(expired)} 条过期的道具状态")
     for entry in expired:
         definition = get_item(entry.state.item_id)
-        if definition is None or definition.handle_state_expire is None:
+        behavior = definition.behavior if definition is not None else None
+        if behavior is None or behavior.expire is None:
             continue
         try:
-            await definition.handle_state_expire(entry)
+            await behavior.expire(entry)
         except _CLEANUP_ERRORS as exc:
             logger.error(
                 f"处理道具 {entry.state.item_id} 的状态到期时出错"

@@ -12,9 +12,10 @@
 from nonebot import logger
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_curse_interceptor,
@@ -119,13 +120,13 @@ register_item(
         item_id=_ITEM_ID,
         name="坚如磐石",
         quality=Quality.GRAY,
-        types=(ItemType.BUFF,),
+        kind=ItemKind.BUFF,
         description="关键抵挡！",
         effect="使用后获得持续1小时的“玉璋护盾”状态：抵消一次黑色诅咒",
-        condition="无",
-        timing="任意",
         note="岩石的重量，令人安心",
-        handle_use=_handle_use,
-        state_labels=((_STATE_KEY_BASE, _SHIELD_NAME),),
+        labels=((_STATE_KEY_BASE, _SHIELD_NAME),),
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

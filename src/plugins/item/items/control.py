@@ -18,8 +18,9 @@ from nonebot import logger
 from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import member_display_name
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
@@ -148,8 +149,9 @@ async def _handle_use(context: ItemUseContext) -> None:
         target_id=parsed.target_id,
         target_ids=() if parsed.target_id is None else (parsed.target_id,),
     )
-    if inner.item.can_use is not None:
-        error = inner.item.can_use(inner)
+    behavior = inner.item.behavior
+    if behavior is not None and behavior.check is not None:
+        error = behavior.check(inner)
         if error:
             # 获取显示名期间被使用道具的状态已变化：退还本道具
             logger.error(
@@ -178,18 +180,18 @@ register_item(
         item_id=_ITEM_ID,
         name="夺心魄",
         quality=Quality.PURPLE,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="我听见了「夺心魄」的回响",
         effect=(
             f'使用指令"/item.use {_ITEM_ID} @使用对象 <道具编号> [其它参数]"'
             "代替使用对象使用品质不高于蓝色稀有的道具，效果等同于使用对象"
             '使用了"/item.use <道具编号> [其它参数]"指令。'
         ),
-        condition="无",
-        timing="任意",
         note="我是燕知春，我即是极道王。",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )

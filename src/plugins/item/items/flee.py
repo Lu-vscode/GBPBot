@@ -16,28 +16,19 @@ from src.plugins._shared.services import (
     DuelStateService,
     require_service,
 )
+from src.plugins.item._durability import durable_behavior
 from src.plugins.item._framework import (
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
     register_item,
 )
-from src.plugins.item.items._durability import (
-    consume,
-    detail_durability,
-    register_durable,
-    transferable_count,
-)
 
-# 道具编号、耐久参数与状态键
+# 道具编号与总耐久
 _ITEM_ID = "886"
 _DURABILITY_TOTAL = 3
-_DURABILITY_STATE_KEY = f"{_ITEM_ID}.durability"
-
-# 登记为耐久型道具：供其它道具（如「强塞」）转移耗损副本时查询状态键
-register_durable(_ITEM_ID, _DURABILITY_STATE_KEY)
 
 # 决斗状态与取消服务（由决斗插件提供；_framework 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
@@ -67,29 +58,6 @@ def _can_use(context: ItemUseContext) -> str | None:
     if _find_duel(context.group_id, context.user_id, context.target_id) is None:
         return _NO_DUEL
     return None
-
-
-def _transferable_count(group_id: int, user_id: int) -> int:
-    """返回可用于交换/合成的「逃之夭夭」数量（全新副本，耗损副本不计入）。"""
-    return transferable_count(
-        group_id, user_id, item_id=_ITEM_ID, state_key=_DURABILITY_STATE_KEY
-    )
-
-
-def _detail_durability(group_id: int, user_id: int) -> str:
-    """详情显示的耐久：存在耗损副本时显示第一个（最早开始耗损）副本的
-    剩余耐久，否则显示满耐久。"""
-    return detail_durability(
-        group_id, user_id, state_key=_DURABILITY_STATE_KEY, total=_DURABILITY_TOTAL
-    )
-
-
-def _handle_consume(context: ItemUseContext) -> bool:
-    """消耗一件「逃之夭夭」：优先对已耗损副本扣 1 点耐久（归零时道具
-    消失），没有耗损副本时开始耗损一件全新副本（库存数量不变，耐久
-    记录进入状态）。返回是否成功消耗。
-    """
-    return consume(context, state_key=_DURABILITY_STATE_KEY, total=_DURABILITY_TOTAL)
 
 
 def _target_name(snapshot: DuelSnapshot, user_id: int) -> str:
@@ -130,18 +98,17 @@ register_item(
         item_id=_ITEM_ID,
         name="逃之夭夭",
         quality=Quality.BLUE,
-        types=(ItemType.COMPOSITE,),
+        kind=ItemKind.COMPOSITE,
         description="三十六计，走为上计",
         effect=f'使用"/item.use {_ITEM_ID} @成员"取消自己与对方的决斗。',
-        condition="无",
         timing="决斗发起后结束前",
-        durability=f"{_DURABILITY_TOTAL}/{_DURABILITY_TOTAL}",
-        detail_durability=_detail_durability,
         note="逃跑并不可耻",
+        durability=f"{_DURABILITY_TOTAL}/{_DURABILITY_TOTAL}",
         accepts_args=True,
-        can_use=_can_use,
-        handle_consume=_handle_consume,
-        handle_use=_handle_use,
-        transferable_count=_transferable_count,
+        behavior=durable_behavior(
+            total=_DURABILITY_TOTAL,
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )

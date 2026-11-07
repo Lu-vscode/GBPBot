@@ -11,9 +11,10 @@
 """
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemTag,
-    ItemType,
     ItemUseContext,
     Quality,
     add_item,
@@ -73,19 +74,19 @@ def _register_copy_items() -> None:
                 item_id=item_id,
                 name=name,
                 quality=quality,
-                types=(ItemType.OPTIONAL,),
-                tags=frozenset({ItemTag.COPY}),
+                kind=ItemKind.OPTIONAL,
+                tags={ItemTag.COPY},
                 description="复制道具。",
                 effect=(
                     f'使用指令"/item.use {item_id} <需要复制的道具编号>"'
                     f"复制一个自己拥有的品质不高于{quality_label(quality)}的道具。"
                 ),
-                condition="无",
-                timing="任意",
                 note=f"如果你足够无聊，可以尝试复制道具{item_id}",
                 accepts_args=True,
-                can_use=_can_use,
-                handle_use=_handle_use,
+                behavior=ItemBehavior(
+                    check=_can_use,
+                    use=_handle_use,
+                ),
             )
         )
 

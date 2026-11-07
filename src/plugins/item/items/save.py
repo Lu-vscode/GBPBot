@@ -26,9 +26,10 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -218,7 +219,7 @@ register_item(
         item_id=_ITEM_ID,
         name="储蓄罐",
         quality=Quality.GREEN,
-        types=(ItemType.BUFF,),
+        kind=ItemKind.BUFF,
         description="老实决斗，很枯燥吧？",
         effect=(
             "使用后获得持续1天的“储蓄”状态：初始“储蓄分数”为0，"
@@ -227,10 +228,10 @@ register_item(
             f'使用"/item.{_ITEM_ID}.draw"使决斗分数增加“储蓄分数”'
             "并失去“储蓄”状态。"
         ),
-        condition="无",
-        timing="任意",
         note="真的是在“储蓄”吗？",
-        handle_use=_handle_use,
-        state_labels=((_STATE_KEY, "储蓄"),),
+        labels=((_STATE_KEY, "储蓄"),),
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

@@ -40,9 +40,11 @@ from src.plugins._shared.services import (
     DuelStateService,
     require_service,
 )
+from src.plugins.item._durability import durable_behavior
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
@@ -50,12 +52,6 @@ from src.plugins.item._framework import (
     get_highest_score_user,
     get_user_score,
     register_item,
-)
-from src.plugins.item.items._durability import (
-    consume,
-    detail_durability,
-    register_durable,
-    transferable_count,
 )
 
 # 本组道具编号
@@ -66,14 +62,10 @@ _ID_COMMONER = "096"
 # 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
 _NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
-# 「天子之怒」的耐久参数与状态键：显示总耐久 1000000，实际总耐久 4
+# 「天子之怒」的耐久参数：显示总耐久 1000000，实际总耐久 4
 _DURABILITY_TOTAL = 4
 _DURABILITY_DISPLAY_TOTAL = 1_000_000
 _DURABILITY_DISPLAY = f"{_DURABILITY_TOTAL}/{_DURABILITY_DISPLAY_TOTAL}"
-_DURABILITY_STATE_KEY = f"{_ID_KING}.durability"
-
-# 登记为耐久型道具：供其它道具（如「强塞」）转移耗损副本时查询状态键
-register_durable(_ID_KING, _DURABILITY_STATE_KEY)
 
 # 决斗状态、事件与结算接管服务（由决斗插件提供；_framework 已
 # require("duel") 保证服务已注册；服务缺失时本道具模块加载失败并被
@@ -121,33 +113,6 @@ async def _handle_fool(context: ItemUseContext) -> None:
         f"{context.user_name} 决斗分数-{_FOOL_SELF_COST}，"
         f"{first_name} 决斗分数-{_FOOL_FIRST_COST}."
     )
-
-
-def _transferable_count_kings(group_id: int, user_id: int) -> int:
-    """返回可用于交换/合成的「天子之怒」数量（全新副本，耗损副本不计入）。"""
-    return transferable_count(
-        group_id, user_id, item_id=_ID_KING, state_key=_DURABILITY_STATE_KEY
-    )
-
-
-def _detail_durability_king(group_id: int, user_id: int) -> str:
-    """「天子之怒」详情显示的耐久：存在耗损副本时显示第一个（最早开始
-    耗损）副本的剩余耐久，否则显示满耐久。"""
-    return detail_durability(
-        group_id,
-        user_id,
-        state_key=_DURABILITY_STATE_KEY,
-        total=_DURABILITY_TOTAL,
-        display_total=_DURABILITY_DISPLAY_TOTAL,
-    )
-
-
-def _handle_consume_king(context: ItemUseContext) -> bool:
-    """消耗一件「天子之怒」：优先对已耗损副本扣 1 点耐久（归零时道具
-    消失），没有耗损副本时开始耗损一件全新副本（库存数量不变，耐久
-    记录进入状态）。返回是否成功消耗。
-    """
-    return consume(context, state_key=_DURABILITY_STATE_KEY, total=_DURABILITY_TOTAL)
 
 
 def _can_use_king(context: ItemUseContext) -> str | None:
@@ -319,17 +284,17 @@ register_item(
         item_id=_ID_FOOL,
         name="庸夫之怒",
         quality=Quality.GRAY,
-        types=(ItemType.CONSUMABLE,),
+        kind=ItemKind.CONSUMABLE,
         description="庸夫之怒，免冠徒跣，以头抢地。",
         effect=(
             f"使用后自己的决斗分数-{_FOOL_SELF_COST}，"
             f"决斗高分榜第一名分数-{_FOOL_FIRST_COST}。"
         ),
-        condition="无",
-        timing="任意",
         note="地动山摇",
-        can_use=_can_use_fool,
-        handle_use=_handle_fool,
+        behavior=ItemBehavior(
+            check=_can_use_fool,
+            use=_handle_fool,
+        ),
     )
 )
 
@@ -338,19 +303,19 @@ register_item(
         item_id=_ID_KING,
         name="天子之怒",
         quality=Quality.PURPLE,
-        types=(ItemType.COMPOSITE,),
+        kind=ItemKind.COMPOSITE,
         description="天子之怒，伏尸百万，流血千里。",
         effect=f'使用"/item.use {_ID_KING} @成员"将其决斗分数设为-1。',
         condition="自身位列决斗高分榜第一名，对方决斗分数非负",
-        timing="任意",
-        durability=_DURABILITY_DISPLAY,
-        detail_durability=_detail_durability_king,
         note="大清亡了",
+        durability=_DURABILITY_DISPLAY,
         accepts_args=True,
-        can_use=_can_use_king,
-        handle_consume=_handle_consume_king,
-        handle_use=_handle_king,
-        transferable_count=_transferable_count_kings,
+        behavior=durable_behavior(
+            total=_DURABILITY_TOTAL,
+            display_total=_DURABILITY_DISPLAY_TOTAL,
+            check=_can_use_king,
+            use=_handle_king,
+        ),
     )
 )
 
@@ -359,7 +324,7 @@ register_item(
         item_id=_ID_COMMONER,
         name="布衣之怒",
         quality=Quality.WHITE,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="若士必怒，伏尸二人，流血五步，天下缟素。",
         effect=(
             f'在决斗中使用"/item.use {_ID_COMMONER} @成员"发起刺杀。'
@@ -371,7 +336,9 @@ register_item(
         timing="决斗开始后结束前",
         note="怀怒未发，休祲降于天。",
         accepts_args=True,
-        can_use=_can_use_commoner,
-        handle_use=_handle_commoner,
+        behavior=ItemBehavior(
+            check=_can_use_commoner,
+            use=_handle_commoner,
+        ),
     )
 )

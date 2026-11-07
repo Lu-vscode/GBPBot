@@ -4,8 +4,8 @@
 """
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
     ItemUseContext,
     Quality,
     register_item,
@@ -23,12 +23,12 @@ register_item(
         item_id="110",
         name="-1",
         quality=Quality.BLACK_CURSE,
-        types=(ItemType.CURSE,),
         description="-1",
         effect="决斗分数-1。",
-        condition="无",
         timing="自动使用",
         note="-1",
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

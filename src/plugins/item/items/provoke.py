@@ -15,8 +15,9 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
@@ -93,17 +94,18 @@ register_item(
         item_id=_ITEM_ID,
         name="挑衅",
         quality=Quality.GREEN,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="竖子安敢一战",
         effect=(
             f'使用指令"/item.use {_ITEM_ID} @成员"强迫对方接受决斗，'
             "并由Bot代替对方发送猜拳表情。"
         ),
-        condition="无",
         timing="自己发起决斗后，对方接受决斗前",
         note="挑衅并不能保证你胜利",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )

@@ -42,9 +42,10 @@ from src.plugins._shared.onebot import (
     truncate_name,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     acquire_curse,
@@ -336,14 +337,14 @@ register_item(
         item_id=_WORM_ID,
         name="！？区区？！",
         quality=Quality.BLACK_CURSE,
-        types=(ItemType.CURSE,),
         description="你是一个可爱的区宝宝🥰",
         effect="使用后获得持续1天的“区”状态：Bot称呼你的名字变成“区宝宝”。",
-        condition="无",
         timing="自动使用",
         note="？！区区？！",
-        handle_use=_handle_worm_use,
-        state_labels=((_STATE_KEY, "区"),),
+        labels=((_STATE_KEY, "区"),),
+        behavior=ItemBehavior(
+            use=_handle_worm_use,
+        ),
     )
 )
 
@@ -488,16 +489,16 @@ register_item(
         item_id=_ADVENT_ID,
         name="区从天降",
         quality=Quality.WHITE,
-        types=(ItemType.CONSUMABLE,),
+        kind=ItemKind.CONSUMABLE,
         description="感染相生了",
         effect=(
             "使用后自己立即获得“678 ！？区区？！”，随后每分钟使一名"
             "（最多三名）决斗分数非零的其它群成员依次获得“678 ！？区区？！”。"
         ),
-        condition="无",
-        timing="任意",
         note="区从天降，愤怒狰狞",
-        handle_use=_handle_advent_use,
+        behavior=ItemBehavior(
+            use=_handle_advent_use,
+        ),
     )
 )
 
@@ -552,15 +553,16 @@ register_item(
         item_id=_WRATH_ID,
         name="狂区之怒",
         quality=Quality.GRAY,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="损人不利己",
         effect=f'使用"/item.use {_WRATH_ID} @使用对象"使其获得"678 ！？区区？！"',
         condition="自己拥有“区”状态",
-        timing="任意",
         note="扭曲的蠕动，阴暗的爬行！",
         accepts_args=True,
-        can_use=_can_use_wrath,
-        handle_use=_handle_wrath_use,
+        behavior=ItemBehavior(
+            check=_can_use_wrath,
+            use=_handle_wrath_use,
+        ),
     )
 )
 
@@ -624,7 +626,7 @@ register_item(
         item_id=_DRAGON_ID,
         name="化区成龙",
         quality=Quality.GRAY,
-        types=(ItemType.PERMANENT,),
+        kind=ItemKind.PERMANENT,
         description="蜕去区皮，升华成龙",
         effect=(
             "使用后有n%的概率（n为群聊中拥有“区”状态的人数）失去“区”状态，"
@@ -634,13 +636,14 @@ register_item(
             "“龙”状态：Bot称呼你的名字变成“龙”。"
         ),
         condition="拥有“区”状态",
-        timing="任意",
         note="一将功成万骨枯",
-        can_use=_can_use_dragon,
-        handle_use=_handle_dragon_use,
-        state_labels=(
+        labels=(
             (_TRUE_DRAGON_STATE_KEY, "真龙"),
             (_DRAGON_STATE_KEY, "龙"),
+        ),
+        behavior=ItemBehavior(
+            check=_can_use_dragon,
+            use=_handle_dragon_use,
         ),
     )
 )

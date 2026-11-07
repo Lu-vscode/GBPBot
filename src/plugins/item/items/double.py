@@ -23,8 +23,9 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
@@ -188,7 +189,7 @@ def _register_multiply_items() -> None:
                 item_id=item_id,
                 name=name,
                 quality=quality,
-                types=(ItemType.OPTIONAL,),
+                kind=ItemKind.OPTIONAL,
                 description=f"{name}！",
                 effect=(
                     f'使用"/item.use {item_id} @成员"使自己与对方的决斗点数×{factor}。'
@@ -197,8 +198,10 @@ def _register_multiply_items() -> None:
                 timing="决斗开始后结束前",
                 note="祝你好运",
                 accepts_args=True,
-                can_use=_can_use_multiply,
-                handle_use=_handle_use,
+                behavior=ItemBehavior(
+                    check=_can_use_multiply,
+                    use=_handle_use,
+                ),
             )
         )
 
@@ -208,15 +211,16 @@ register_item(
         item_id=_ID_HALVE,
         name="减半",
         quality=Quality.GRAY,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="懦夫专属",
         effect=f'使用"/item.use {_ID_HALVE} @成员"使自己与对方的决斗点数整除2。',
-        condition="无",
         timing="决斗开始后结束前",
         note="1//2=?",
         accepts_args=True,
-        can_use=_usage_error,
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            check=_usage_error,
+            use=_handle_use,
+        ),
     )
 )
 

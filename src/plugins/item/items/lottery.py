@@ -16,8 +16,9 @@
 import random
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     register_item,
@@ -84,7 +85,7 @@ def _register_lottery_items() -> None:
                 item_id=item_id,
                 name=name,
                 quality=quality,
-                types=(ItemType.CONSUMABLE,),
+                kind=ItemKind.CONSUMABLE,
                 description=description,
                 effect=(
                     f"使用后有{_percent_text(win_chance)}%的概率"
@@ -92,10 +93,10 @@ def _register_lottery_items() -> None:
                     f"{_percent_text(1 - win_chance)}%的概率"
                     f"失去{_SCORE_DELTA}决斗分数。"
                 ),
-                condition="无",
-                timing="任意",
                 note=note,
-                handle_use=_handle_use,
+                behavior=ItemBehavior(
+                    use=_handle_use,
+                ),
             )
         )
     register_item(
@@ -103,16 +104,16 @@ def _register_lottery_items() -> None:
             item_id=_CURSE_ITEM_ID,
             name="被诅咒的抽奖券",
             quality=Quality.BLACK_CURSE,
-            types=(ItemType.CURSE,),
             description="祝你好运",
             effect=(
                 f"使用后有{_percent_text(_CURSE_LOSE_CHANCE)}%的概率"
                 f"失去{_SCORE_DELTA}决斗分数。"
             ),
-            condition="无",
             timing="自动使用",
             note="幸运儿没有奖励",
-            handle_use=_handle_curse_use,
+            behavior=ItemBehavior(
+                use=_handle_curse_use,
+            ),
         )
     )
 

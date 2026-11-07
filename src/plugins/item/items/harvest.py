@@ -6,8 +6,9 @@
 """
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_user_scores,
@@ -40,12 +41,12 @@ register_item(
         item_id="125",
         name="五谷丰登",
         quality=Quality.WHITE,
-        types=(ItemType.CONSUMABLE,),
+        kind=ItemKind.CONSUMABLE,
         description="五谷丰登",
         effect="使用后所有决斗分数非零的群成员决斗分数+1。",
-        condition="无",
-        timing="任意",
         note="给三国杀差评谢谢喵",
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

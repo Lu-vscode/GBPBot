@@ -17,8 +17,9 @@ from nonebot import logger
 
 from src.plugins._shared.services import GrantedItem, ItemService, get_service
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_items,
@@ -135,17 +136,18 @@ def _register_fission_items() -> None:
                 item_id=item_id,
                 name=name,
                 quality=quality,
-                types=(ItemType.CONSUMABLE,),
+                kind=ItemKind.CONSUMABLE,
                 description=description,
                 effect=(
                     f"使用后{cost_text}"
                     f"获得{count}件随机{quality_label(produce_quality)}道具。"
                 ),
                 condition=f"决斗分数>={cost}" if cost else "无",
-                timing="任意",
                 note=note,
-                can_use=_can_use,
-                handle_use=_handle_use,
+                behavior=ItemBehavior(
+                    check=_can_use,
+                    use=_handle_use,
+                ),
             )
         )
 

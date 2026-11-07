@@ -27,9 +27,10 @@ from src.plugins._shared.services import (
     require_service,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -164,17 +165,17 @@ register_item(
         item_id=_ITEM_ID,
         name="衔尾蛇",
         quality=Quality.GOLD,
-        types=(ItemType.BUFF,),
+        kind=ItemKind.BUFF,
         description="游走在排行榜中的衔尾蛇",
         effect=(
             "使用后获得持续1天的“衔尾蛇”状态：决斗胜利/失败结算完成后，"
             "与决斗分数总榜的前一名/后一名交换分数。如果自己是第一名/最后一名，"
             "胜利/失败后与最后一名/第一名交换分数。"
         ),
-        condition="无",
-        timing="任意",
         note="周而复始，始而复终。",
-        handle_use=_handle_use,
-        state_labels=((_STATE_KEY, "衔尾蛇"),),
+        labels=((_STATE_KEY, "衔尾蛇"),),
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

@@ -1,13 +1,14 @@
-"""道具插件的核心框架：道具定义与注册表、品质与类型、使用上下文与
+"""道具插件的核心框架：道具定义与注册表、品质与分类标签、使用上下文与
 使用流程、库存与状态 API、随机抽取代数。
 
 道具模块（items/ 下）在导入期调用 register_item 注册道具；新增道具文件
 由 items/__init__.py 自动发现导入，无需修改本文件。库存与状态的加载、
 保存经 _storage.py 完成，本模块维护内存数据并提供操作 API。
 
-道具的功能分类走标签轴（ItemTag）：道具在定义中声明自己的功能标签，
-其它道具经 has_tag/items_with_tag 按标签查询集合，不再从具体道具模块
-导出分类常量。
+道具分类有两个互不相交的轴：展示分类 kind（ItemKind，单值、互斥，用于
+详情与统计）与功能标签 ItemTag（可多值，只记录“具备什么机制”，供其它
+道具经 has_tag/items_with_tag 查询）。诅咒道具可省略 kind，由黑色诅咒
+品质派生。
 
 本模块仅由道具插件包内（含道具模块）导入使用；跨插件交互（签到发放
 道具、诅咒自动处理）经 _shared/services.py 的 ItemService 进行。
@@ -15,7 +16,7 @@
 
 import random
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from enum import Enum, IntEnum, StrEnum
 from typing import TYPE_CHECKING, Any
@@ -72,24 +73,29 @@ def quality_label(quality: Quality) -> str:
     return _QUALITY_LABELS[quality]
 
 
-class ItemType(Enum):
-    """道具类型。"""
+class ItemKind(Enum):
+    """道具分类：回答“这件道具是什么”，用于详情展示与统计（单值、互斥）。
+
+    与功能标签（ItemTag）是两条互不相交的轴：分类是道具的身份，标签是
+    道具具备的机制。黑色诅咒品质已能表达诅咒型分类，故诅咒道具可省略
+    kind，由品质派生（见 ItemDefinition.resolved_kind）；需要新的展示
+    分类时在此新增成员并同步 docs/count/item.md。
+    """
 
     CONSUMABLE = "消耗型"
     CURSE = "诅咒型"
     BUFF = "Buff型"
     PERMANENT = "永久型"
-    DURABLE = "耐久型"
     OPTIONAL = "可选型"
     COMPOSITE = "复合型"
-    SPECIAL = "特殊型"
 
 
 class ItemTag(StrEnum):
-    """道具的功能标签：跨道具的功能分类（与展示用的 ItemType 无关）。
+    """道具的功能标签：只记录“具备什么机制”，与展示分类（ItemKind）不同轴。
 
-    标签只声明道具“属于哪一类功能”，不涉及品质、展示与使用方式；
-    道具按需要声明多个标签，其它道具经 has_tag/items_with_tag 查询。
+    标签不参与详情展示与品质校验：展示分类回答“它是什么”（由 kind 表达），
+    标签回答“它具备什么机制”；道具按需要声明多个标签，其它道具经
+    has_tag/items_with_tag 查询，不依赖具体道具模块。
     """
 
     COPY = "复制型"
@@ -103,8 +109,48 @@ _StateExpireHandler = Callable[["ItemStateExpireContext"], Awaitable[None]]
 
 
 @dataclass(frozen=True)
+class ItemBehavior:
+    """一件道具的行为钩子（与展示数据分离，纯展示道具不需要）。
+
+    钩子均为可选：未提供时按框架默认处理（校验通过、消耗一件库存、
+    无使用效果等）。行为块可在同组道具间共享（如一组道具使用同一对
+    check/use），避免每件道具重复声明。
+    """
+
+    check: Callable[["ItemUseContext"], str | None] | None = None
+    """使用前校验：返回非空错误文案表示本次不可用（此时不消耗）。"""
+
+    use: Callable[["ItemUseContext"], Awaitable[None]] | None = None
+    """使用效果（成功提示消息由效果自身发送）。"""
+
+    consume: Callable[["ItemUseContext"], bool] | None = None
+    """消耗道具的自定义方式（默认为消耗一件库存）；返回 False 表示未能
+    消耗，本次使用中止且不执行效果。耐久型等道具在此自行扣减耐久或移除
+    副本（须为同步函数，在校验与消耗的同步段内执行）。"""
+
+    transferable: Callable[[int, int, str], int] | None = None
+    """返回成员可用于交换与合成的该道具副本数量（参数为群号、成员 QQ 号
+    与道具编号；默认 None 表示全部库存均可参与）。交换与合成在库存数量
+    满足要求后按该数量复核，如耐久耗损的副本可在此排除。"""
+
+    expire: _StateExpireHandler | None = None
+    """状态到期回调（由定时清理调用；未提供时过期状态只被静默删除）。"""
+
+    durability_text: Callable[[int, int, str], str] | None = None
+    """详情消息中耐久条目的动态显示（参数为查看者所在群号、其 QQ 号与
+    道具编号）；默认 None 表示使用 durability 的静态文本；供道具模块按
+    成员状态动态展示（如显示耗损副本的剩余耐久）。"""
+
+
+@dataclass(frozen=True)
 class ItemDefinition:
-    """一件道具的定义（由道具模块在导入期注册，注册后不可变）。"""
+    """一件道具的定义（由道具模块在导入期注册，注册后不可变）。
+
+    字段分三类：身份（item_id/name/quality/kind/tags）、展示文案
+    （description/effect/condition/timing/note/durability）与行为
+    （behavior）。分类（kind）与标签（tags）是两条互不相交的轴，
+    分别见 ItemKind 与 ItemTag。
+    """
 
     item_id: str
     """道具编号：三位数字字符串（000~999），0 不可省略；
@@ -116,73 +162,74 @@ class ItemDefinition:
     quality: Quality
     """品质。"""
 
-    types: tuple[ItemType, ...]
-    """类型（可为多种类型的复合）。"""
-
     description: str
     """介绍。"""
 
     effect: str
     """功能。"""
 
-    condition: str
-    """使用条件（展示文本）。"""
+    kind: ItemKind | None = None
+    """展示分类（单值、互斥）：用于详情与分类统计。None 表示由品质派生，
+    仅黑色诅咒道具可省略（派生为诅咒型）。"""
 
-    timing: str
-    """使用时机（展示文本）。"""
+    tags: Collection[ItemTag] = ()
+    """功能标签（可多个，注册时归一化为 frozenset）：只记录道具具备的
+    机制（如复制型），供其它道具按功能查询；不参与详情展示与统计。"""
 
-    tags: frozenset[ItemTag] = frozenset()
-    """功能标签（可多个）：供其它道具按功能查询道具集合，如复制型道具
-    声明 ItemTag.COPY 后可由「复得之轮」排除；不参与详情展示与品质校验。"""
+    condition: str | None = None
+    """使用条件（展示文本）；None 表示“无”。"""
+
+    timing: str | None = None
+    """使用时机（展示文本）；None 表示“任意”。"""
+
+    note: str = ""
+    """备注（空字符串表示详情中不显示备注行）。"""
 
     durability: str = "1/1"
     """耐久（展示文本，一般为"剩余耐久/总耐久"）。"""
 
-    detail_durability: Callable[[int, int], str] | None = None
-    """详情消息中耐久条目的动态显示（参数为查看者所在群号与其 QQ 号）；
-    默认 None 表示使用 durability 的静态文本；供道具模块按成员状态
-    动态展示（如显示耗损副本的剩余耐久）。"""
-
-    note: str = ""
-    """备注。"""
-
     accepts_args: bool = False
     """使用指令是否接受额外参数（可选型等道具为 True）。"""
 
-    can_use: Callable[["ItemUseContext"], str | None] | None = None
-    """使用前校验：返回非空错误文案表示本次不可用（此时不消耗）。"""
-
-    handle_use: Callable[["ItemUseContext"], Awaitable[None]] | None = None
-    """使用效果（成功提示消息由效果自身发送）。"""
-
-    handle_consume: Callable[["ItemUseContext"], bool] | None = None
-    """消耗道具的自定义方式（默认为消耗一件库存）；返回 False 表示未能
-    消耗，本次使用中止且不执行效果。耐久型等道具在此自行扣减耐久或移除
-    副本（须为同步函数，在校验与消耗的同步段内执行）。"""
-
-    transferable_count: Callable[[int, int], int] | None = None
-    """返回成员可用于交换与合成的该道具副本数量（参数为群号与成员 QQ 号；
-    默认 None 表示全部库存均可参与）。交换与合成在库存数量满足要求后按
-    该数量复核，如耐久耗损的副本可在此排除。"""
-
-    handle_state_expire: _StateExpireHandler | None = None
-    """状态到期回调（由定时清理调用；未提供时过期状态只被静默删除）。"""
-
-    state_labels: tuple[tuple[str, str], ...] = ()
+    labels: tuple[tuple[str, str], ...] = ()
     """本道具产生的状态的显示名（状态键与显示名对，如
     ("314.ouroboros", "衔尾蛇")）；供其它道具在文案中显示状态名
     （见 state_label）。动态状态键（如按层编号的状态）可声明其公共
     前缀。同一状态键只应由产生该状态的道具声明。"""
+
+    behavior: ItemBehavior | None = None
+    """行为钩子（校验、消耗、使用效果、到期回调等）；纯展示道具可省略。"""
+
+    def __post_init__(self) -> None:
+        """把 tags 归一化为 frozenset，便于运行期查询与比较。"""
+        object.__setattr__(self, "tags", frozenset(self.tags))
 
     @property
     def label(self) -> str:
         """道具的显示名（"<编号> <名称>"，如 "111 +1"）。"""
         return f"{self.item_id} {self.name}"
 
+    @property
+    def resolved_kind(self) -> ItemKind:
+        """返回展示分类：未声明时由品质派生（黑色诅咒 → 诅咒型）。
+
+        非黑色诅咒道具未声明 kind 属开发错误，注册时即抛出 ValueError；
+        注册成功的定义不会再走到该异常分支。
+        """
+        if self.kind is not None:
+            return self.kind
+        if self.quality is Quality.BLACK_CURSE:
+            return ItemKind.CURSE
+        message = (
+            f"道具 {self.item_id} 未声明分类（kind），且品质不是黑色诅咒，"
+            "无法由品质派生"
+        )
+        raise ValueError(message)
+
 
 @dataclass
 class ItemUseContext:
-    """一次道具使用的上下文（注入给道具模块的 can_use/handle_use）。"""
+    """一次道具使用的上下文（注入给道具模块的 check/use 等行为钩子）。"""
 
     bot: "Bot"
     """发送消息的机器人实例。"""
@@ -256,15 +303,16 @@ async def run_item_use(context: ItemUseContext, *, consume: bool = True) -> bool
     道具效果执行成功后依次调用使用后钩子（见 add_item_use_hook），
     供「复得之轮」等道具在成员使用其它道具后附加效果。
     """
-    if context.item.can_use is not None:
-        error = context.item.can_use(context)
+    behavior = context.item.behavior
+    if behavior is not None and behavior.check is not None:
+        error = behavior.check(context)
         if error:
             await context.send(error)
             return False
     if consume:
         consumed = (
-            context.item.handle_consume(context)
-            if context.item.handle_consume is not None
+            behavior.consume(context)
+            if behavior is not None and behavior.consume is not None
             else remove_item(context.group_id, context.user_id, context.item.item_id)
         )
         if not consumed:
@@ -275,8 +323,8 @@ async def run_item_use(context: ItemUseContext, *, consume: bool = True) -> bool
             )
             await context.send("道具使用失败：道具状态异常，本次未消耗。")
             return False
-    if context.item.handle_use is not None:
-        await context.item.handle_use(context)
+    if behavior is not None and behavior.use is not None:
+        await behavior.use(context)
     await run_item_use_hooks(context)
     return True
 
@@ -361,21 +409,23 @@ async def run_curse_interceptors(context: ItemUseContext) -> bool:
 def detail_text(definition: ItemDefinition, group_id: int, user_id: int) -> str:
     """生成道具的完整信息文本（用于详情与黑色诅咒获得消息）。
 
-    耐久条目默认使用定义中的静态文本；道具模块提供 detail_durability
-    钩子时改用其动态结果（按查看者所在群与 QQ 号计算）。
+    耐久条目默认使用定义中的静态文本；行为块提供 durability_text 钩子
+    时改用其动态结果（按查看者所在群与 QQ 号计算）。使用条件与使用
+    时机未声明时分别显示“无”与“任意”。
     """
     durability = definition.durability
-    if definition.detail_durability is not None:
-        durability = definition.detail_durability(group_id, user_id)
+    behavior = definition.behavior
+    if behavior is not None and behavior.durability_text is not None:
+        durability = behavior.durability_text(group_id, user_id, definition.item_id)
     lines = [
         f"编号：{definition.item_id}",
         f"名称：{definition.name}",
         f"品质：{quality_label(definition.quality)}",
-        f"类型：{'、'.join(item_type.value for item_type in definition.types)}",
+        f"类型：{definition.resolved_kind.value}",
         f"介绍：{definition.description}",
         f"功能：{definition.effect}",
-        f"使用条件：{definition.condition}",
-        f"使用时机：{definition.timing}",
+        f"使用条件：{definition.condition or '无'}",
+        f"使用时机：{definition.timing or '任意'}",
         f"耐久：{durability}",
     ]
     if definition.note:
@@ -394,7 +444,7 @@ async def acquire_curse(
 
     诅咒不写入库存：先以合并转发发送完整信息（节点名"道具详情"），
     再询问黑色诅咒拦截器（如「坚如磐石」的护盾）；未被拦截时按诅咒
-    自身的 handle_use 自动使用（不消耗库存）。
+    自身的 use 钩子自动使用（不消耗库存）。
 
     签到、合成与道具效果转赠诅咒统一经本函数处理，保证信息播报、
     拦截与自动使用行为一致。definition 不是黑色诅咒时抛出 ValueError
@@ -529,7 +579,7 @@ def sign_bonus(group_id: int, user_id: int) -> int:
 # 已注册的道具：编号 -> 定义（注册顺序即道具模块导入顺序）
 _ITEMS: dict[str, ItemDefinition] = {}
 
-# 状态键 -> 状态显示名（由各道具的 state_labels 在注册时汇总）
+# 状态键 -> 状态显示名（由各道具的 labels 在注册时汇总）
 _STATE_LABELS: dict[str, str] = {}
 
 # 道具编号的位数（三位数字字符串）
@@ -552,7 +602,8 @@ def register_item(definition: ItemDefinition) -> ItemDefinition:
       开发时指定（设计未指定时应从 100 起向上寻找可用编号并写入代码，
       000~099 保留给强大/特殊的道具）
     - 编号不得与已注册道具重复
-    - 品质为黑色诅咒与类型含诅咒型必须同时成立（互为充要条件）
+    - 品质为黑色诅咒与分类为诅咒型必须同时成立（互为充要条件）；
+      非黑色诅咒道具未声明 kind 时无法派生分类，同样视为开发错误
     """
     if not definition.item_id:
         message = "道具编号不能留空，请在道具开发时指定编号"
@@ -568,20 +619,31 @@ def register_item(definition: ItemDefinition) -> ItemDefinition:
             f"「{_ITEMS[definition.item_id].name}」占用"
         )
         raise ValueError(message)
-    cursed = ItemType.CURSE in definition.types
-    if (definition.quality is Quality.BLACK_CURSE) != cursed:
+    kind = definition.resolved_kind
+    if (definition.quality is Quality.BLACK_CURSE) != (kind is ItemKind.CURSE):
         message = (
-            f"道具 {definition.item_id} 的品质与类型不一致：黑色诅咒品质与诅咒型"
-            "类型必须同时出现"
+            f"道具 {definition.item_id} 的品质与分类不一致：黑色诅咒品质与诅咒型"
+            "分类必须同时出现"
         )
         raise ValueError(message)
     _ITEMS[definition.item_id] = definition
-    _STATE_LABELS.update(dict(definition.state_labels))
+    _STATE_LABELS.update(dict(definition.labels))
     logger.info(
         f"道具已注册：{definition.label}（{quality_label(definition.quality)}、"
-        f"{'、'.join(item_type.value for item_type in definition.types)}）"
+        f"{kind.value}）"
     )
     return definition
+
+
+def register_items(*definitions: ItemDefinition) -> None:
+    """按顺序批量注册多件道具（等价于逐件调用 register_item）。
+
+    供成组道具（同一模块内的多件相似道具）用一条语句注册；任一件
+    注册失败时抛出 ValueError，由 items 加载器记 warning 并忽略整个
+    模块（与逐件注册的失败语义一致）。
+    """
+    for definition in definitions:
+        register_item(definition)
 
 
 def get_item(item_id: str) -> ItemDefinition | None:
@@ -671,12 +733,13 @@ def get_item_count(group_id: int, user_id: int, item_id: str) -> int:
 def transferable_count(group_id: int, user_id: int, item_id: str) -> int:
     """返回成员可用于交换与合成的道具数量。
 
-    道具模块可经 transferable_count 钩子排除不可交易的副本（如耐久
-    耗损的副本）；未注册编号按库存数量处理。
+    道具模块可经 ItemBehavior.transferable 钩子排除不可交易的副本
+    （如耐久耗损的副本）；未注册编号按库存数量处理。
     """
     definition = _ITEMS.get(item_id)
-    if definition is not None and definition.transferable_count is not None:
-        return definition.transferable_count(group_id, user_id)
+    behavior = definition.behavior if definition is not None else None
+    if behavior is not None and behavior.transferable is not None:
+        return behavior.transferable(group_id, user_id, item_id)
     return get_item_count(group_id, user_id, item_id)
 
 
@@ -954,7 +1017,7 @@ def purge_expired_states() -> list[ItemStateExpireContext]:
     """清理全部已过期的状态并落盘，返回到期条目列表（无清理时不落盘）。
 
     返回的条目由主模块按来源道具分发到期回调（见
-    ItemDefinition.handle_state_expire）；未提供回调或处理失败时
+    ItemBehavior.expire）；未提供回调或处理失败时
     状态仍已被删除。
     """
     now = time.time()

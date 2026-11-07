@@ -35,10 +35,11 @@ from src.plugins._shared.onebot import (
     truncate_name,
 )
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
     ItemStateExpireContext,
-    ItemType,
     ItemUseContext,
     Quality,
     add_item,
@@ -305,7 +306,7 @@ register_item(
         item_id=_ITEM_ID,
         name="击鼓传花",
         quality=Quality.WHITE,
-        types=(ItemType.COMPOSITE,),
+        kind=ItemKind.COMPOSITE,
         description=(
             "咚咚咚，鼓儿敲，红花一朵绕圈跑。你也捧，我也抛，"
             "越捧越高越热闹。鼓声一停风也小，花在谁手谁心焦。"
@@ -320,12 +321,12 @@ register_item(
             "倒计时重置，倒计时归零时使拥有者失去<层数>×5 点决斗分数并"
             "清空“泡沫”状态。"
         ),
-        condition="无",
-        timing="任意",
         note="只是童年小游戏而已",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
-        handle_state_expire=_handle_state_expire,
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+            expire=_handle_state_expire,
+        ),
     )
 )

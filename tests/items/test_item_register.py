@@ -208,9 +208,9 @@ def _report(checks: list[ModuleCheck], framework: Any) -> int:
     )
     logger.info(f"已注册道具（共 {len(framework._ITEMS)} 件）：")
     for item in framework.iter_items():
-        type_text = "、".join(item_type.value for item_type in item.types)
+        kind_text = item.resolved_kind.value
         logger.info(
-            f"  {item.label}（{framework.quality_label(item.quality)}、{type_text}）"
+            f"  {item.label}（{framework.quality_label(item.quality)}、{kind_text}）"
         )
     abnormal = counter[_STATUS_FAIL] + counter[_STATUS_WARN]
     if abnormal:

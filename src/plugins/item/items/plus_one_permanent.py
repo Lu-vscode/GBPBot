@@ -9,9 +9,10 @@ SignScoreBonusService）：本模块只负责按状态层数登记加成提供�
 """
 
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -73,13 +74,13 @@ register_item(
         item_id=_ITEM_ID,
         name="+1",
         quality=Quality.BLUE,
-        types=(ItemType.PERMANENT,),
+        kind=ItemKind.PERMANENT,
         description="永久+1",
         effect="使用后获得1层永久状态“+1”：每日签到获得的决斗分数+[层数]。",
-        condition="无",
-        timing="任意",
         note="等我启动",
-        handle_use=_handle_use,
-        state_labels=((_STATE_KEY, "+1"),),
+        labels=((_STATE_KEY, "+1"),),
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

@@ -14,8 +14,9 @@ import random
 from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import member_display_name
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_user_score,
@@ -140,13 +141,13 @@ register_item(
         item_id="044",
         name="自刎归天",
         quality=Quality.GRAY,
-        types=(ItemType.CONSUMABLE,),
+        kind=ItemKind.CONSUMABLE,
         description="死是凉爽的夏夜。",
         effect="使用后使自己的决斗分数变为原始分数的负绝对值。",
-        condition="无",
-        timing="任意",
         note="你死了，我们吃什么。",
-        handle_use=_handle_suicide,
+        behavior=ItemBehavior(
+            use=_handle_suicide,
+        ),
     )
 )
 
@@ -155,15 +156,15 @@ register_item(
         item_id="106",
         name="反转",
         quality=Quality.PURPLE,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="反转一个人的决斗分数。",
         effect='使用"/item.use 106 @成员"将其决斗分数变为相反数（可以对自己使用）。',
-        condition="无",
-        timing="任意",
         note="一念神魔",
         accepts_args=True,
-        can_use=_can_use_reverse,
-        handle_use=_handle_reverse,
+        behavior=ItemBehavior(
+            check=_can_use_reverse,
+            use=_handle_reverse,
+        ),
     )
 )
 
@@ -172,14 +173,15 @@ register_item(
         item_id="107",
         name="涅槃",
         quality=Quality.BLUE,
-        types=(ItemType.CONSUMABLE,),
+        kind=ItemKind.CONSUMABLE,
         description="涅槃重生",
         effect="使用后有80%的概率使自己的决斗分数变为原始分数的绝对值。",
         condition="自身位列决斗低分榜第一名",
-        timing="任意",
         note="亡者不亡",
-        can_use=_can_use_nirvana,
-        handle_use=_handle_nirvana,
+        behavior=ItemBehavior(
+            check=_can_use_nirvana,
+            use=_handle_nirvana,
+        ),
     )
 )
 
@@ -188,16 +190,17 @@ register_item(
         item_id="444",
         name="阎王",
         quality=Quality.BLUE,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="我从地狱归来。",
         effect=(
             '使用指令"/item.use 444 @成员"将该成员的决斗分数变为其原始分数的负绝对值。'
         ),
         condition="自身位列决斗低分榜第一名",
-        timing="任意",
         note="小心线下真人快打。",
         accepts_args=True,
-        can_use=_can_use_yama,
-        handle_use=_handle_yama,
+        behavior=ItemBehavior(
+            check=_can_use_yama,
+            use=_handle_yama,
+        ),
     )
 )

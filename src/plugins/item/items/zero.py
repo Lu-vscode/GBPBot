@@ -26,9 +26,10 @@ from nonebot.rule import is_type
 from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, sender_display_name
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -63,7 +64,7 @@ _OTHER_LIMIT = 10
 # 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
 _NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
-# 清空状态文案中的状态显示名由产生状态的道具在 state_labels 中声明（见
+# 清空状态文案中的状态显示名由产生状态的道具在 labels 中声明（见
 # _framework.state_label），未声明的回退为道具名称
 
 
@@ -281,7 +282,7 @@ register_item(
         item_id=_ITEM_ID,
         name="归零者",
         quality=Quality.GOLD,
-        types=(ItemType.PERMANENT,),
+        kind=ItemKind.PERMANENT,
         description="让宇宙由零维重获新生",
         effect=(
             "使用后将自己和随机10名决斗分数非零的群成员的决斗分数设为0，"
@@ -290,9 +291,9 @@ register_item(
             '“新生”：可以使用"/item.000.rebirth"将自己的决斗分数取绝对值，'
             "冷却为1周。"
         ),
-        condition="无",
-        timing="任意",
         note="“归零”和“新生”状态唯一",
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

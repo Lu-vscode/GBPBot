@@ -31,8 +31,9 @@ from src.plugins._shared.config import (
 )
 from src.plugins._shared.services import DuelBotAcceptService, require_service
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     add_item,
@@ -323,7 +324,7 @@ register_item(
         item_id=_ITEM_ID,
         name="篡天",
         quality=Quality.GOLD,
-        types=(ItemType.OPTIONAL,),
+        kind=ItemKind.OPTIONAL,
         description="篡改Bot设定",
         effect=(
             "可以使用一次以下指令之一。\n"
@@ -336,11 +337,11 @@ register_item(
             f'3."/item.use {_ITEM_ID} {_NICKNAME_GUARD_KEY}"：'
             "禁用本群的群昵称保护功能。"
         ),
-        condition="无",
-        timing="任意",
         note="篡改会在下次更新时被天意的大手覆盖。",
         accepts_args=True,
-        can_use=_can_use,
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            check=_can_use,
+            use=_handle_use,
+        ),
     )
 )

@@ -19,9 +19,10 @@ from nonebot.adapters.onebot.v11 import Bot
 from src.plugins._shared.onebot import send_group_text
 from src.plugins._shared.services import DuelScoreInterceptService, require_service
 from src.plugins.item._framework import (
+    ItemBehavior,
     ItemDefinition,
+    ItemKind,
     ItemState,
-    ItemType,
     ItemUseContext,
     Quality,
     add_state,
@@ -157,15 +158,15 @@ register_item(
         item_id=_ITEM_ID,
         name="无懈可击",
         quality=Quality.GREEN,
-        types=(ItemType.BUFF,),
+        kind=ItemKind.BUFF,
         description="抵消一次决斗分数改变",
         effect=(
             "使用后获得持续1小时的“无懈可击”状态。\n"
             "“无懈可击”状态：当拥有者的决斗分数改变时，抵消改变并失去此状态。"
         ),
-        condition="无",
-        timing="任意",
         note="注意使用时机",
-        handle_use=_handle_use,
+        behavior=ItemBehavior(
+            use=_handle_use,
+        ),
     )
 )

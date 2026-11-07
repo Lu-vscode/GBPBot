@@ -13,14 +13,13 @@ _craft.py 的抽取与材料校验。合成失败（抽到低一级品质）时�
 未使用过的副本可正常交换/合成，已耗损的副本不可。
 """
 
-from functools import partial
-
 from nonebot import logger
 
 from src.plugins.item._craft import FAILED_PREFIX, craft_error, draw_craft_results
+from src.plugins.item._durability import durable_behavior
 from src.plugins.item._framework import (
     ItemDefinition,
-    ItemType,
+    ItemKind,
     ItemUseContext,
     Quality,
     acquire_curse,
@@ -30,12 +29,6 @@ from src.plugins.item._framework import (
     quality_label,
     register_item,
     remove_items,
-)
-from src.plugins.item.items._durability import (
-    consume,
-    detail_durability,
-    register_durable,
-    transferable_count,
 )
 
 # 本组道具编号 -> 品质（编号按设计文档顺序由低到高分配：132 灰 ~ 136 紫）
@@ -59,11 +52,6 @@ _QUALITY_COLORS = {
 # 每件保险的总耐久与合成材料数量（两件）
 _DURABILITY_TOTAL = 3
 _ARG_COUNT = 2
-
-
-def _state_key(item_id: str) -> str:
-    """返回指定保险道具的耗损状态键。"""
-    return f"{item_id}.durability"
 
 
 def _usage(item_id: str) -> str:
@@ -105,18 +93,6 @@ def _can_use(context: ItemUseContext) -> str | None:
             f"{first.label}、{second.label} 不符合要求。"
         )
     return craft_error(context.group_id, context.user_id, first, second)
-
-
-def _handle_consume(context: ItemUseContext) -> bool:
-    """消耗一件保险：优先对已耗损副本扣 1 点耐久（归零时道具消失），
-    没有耗损副本时开始耗损一件全新副本（库存数量不变，耐久记录进入
-    状态）。返回是否成功消耗。
-    """
-    return consume(
-        context,
-        state_key=_state_key(context.item.item_id),
-        total=_DURABILITY_TOTAL,
-    )
 
 
 async def _handle_use(context: ItemUseContext) -> None:
@@ -182,15 +158,21 @@ async def _handle_use(context: ItemUseContext) -> None:
             )
 
 
+# 本组五件道具的耐久行为完全相同（消耗、可交易数量与详情耐久），
+# 共用同一个行为块；校验与效果按道具自身属性（品质）区分
+_BEHAVIOR = durable_behavior(
+    total=_DURABILITY_TOTAL,
+    check=_can_use,
+    use=_handle_use,
+)
+
 for _item_id, _quality in _INSURANCE_QUALITIES.items():
-    # 登记为耐久型道具：供其它道具（如「强塞」）转移耗损副本时查询状态键
-    register_durable(_item_id, _state_key(_item_id))
     register_item(
         ItemDefinition(
             item_id=_item_id,
             name=f"保险（{_QUALITY_COLORS[_quality]}）",
             quality=_quality,
-            types=(ItemType.COMPOSITE,),
+            kind=ItemKind.COMPOSITE,
             description="让合成不再提心吊胆",
             effect=(
                 f'使用"/item.use {_item_id} <道具1编号> <道具2编号>"'
@@ -198,23 +180,9 @@ for _item_id, _quality in _INSURANCE_QUALITIES.items():
                 "合成相同。若合成失败，重新获得合成消耗的两个道具，"
                 "合成产物不回收。"
             ),
-            condition="无",
-            timing="任意",
-            durability=f"{_DURABILITY_TOTAL}/{_DURABILITY_TOTAL}",
-            detail_durability=partial(
-                detail_durability,
-                state_key=_state_key(_item_id),
-                total=_DURABILITY_TOTAL,
-            ),
             note="保险不是免费的",
+            durability=f"{_DURABILITY_TOTAL}/{_DURABILITY_TOTAL}",
             accepts_args=True,
-            can_use=_can_use,
-            handle_consume=_handle_consume,
-            handle_use=_handle_use,
-            transferable_count=partial(
-                transferable_count,
-                item_id=_item_id,
-                state_key=_state_key(_item_id),
-            ),
+            behavior=_BEHAVIOR,
         )
     )
