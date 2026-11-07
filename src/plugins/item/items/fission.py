@@ -49,12 +49,12 @@ def _produce_quality(quality: Quality) -> Quality:
     return Quality(quality.value - 1)
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：有分数消耗的道具需决斗分数足够；返回错误文案时本次不消耗。"""
     cost = _COSTS[context.item.item_id]
     if not cost:
         return None
-    score = get_user_score(context.group_id, context.user_id)
+    score = await get_user_score(context.group_id, context.user_id)
     if score < cost:
         return (
             f"使用 {context.item.label} 需要消耗 {cost} 决斗分数，"
@@ -69,7 +69,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     cost = _COSTS[context.item.item_id]
     produce_quality = _produce_quality(context.item.quality)
     if cost:
-        context.add_score(-cost)
+        await context.add_score(-cost)
     produced: list[ItemDefinition] = []
     curses: list[ItemDefinition] = []
     gained_ids: list[str] = []
@@ -88,7 +88,7 @@ async def _handle_use(context: ItemUseContext) -> None:
         else:
             gained_ids.append(item.item_id)
         produced.append(item)
-    add_items(context.group_id, context.user_id, gained_ids)
+    await add_items(context.group_id, context.user_id, gained_ids)
     # 按抽取顺序聚合同一件道具的显示文本（label 含编号，可作唯一键）
     counts: dict[str, int] = {}
     for item in produced:

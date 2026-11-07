@@ -146,23 +146,23 @@ _GESTURE_ITEMS = (
 _META_BY_ID = {meta.item_id: meta for meta in _GESTURE_ITEMS}
 
 
-def _held_gesture_meta(group_id: int, user_id: int) -> _GestureItem | None:
+async def _held_gesture_meta(group_id: int, user_id: int) -> _GestureItem | None:
     """返回成员身上本组道具产生的有效状态的信息，无此类状态时返回 None。
 
     四件道具的状态互斥，正常情况下至多持有一个；数据异常同时存在
     多个时取第一个。
     """
-    for state in list_states(group_id, user_id):
+    for state in await list_states(group_id, user_id):
         meta = _META_BY_ID.get(state.item_id)
         if meta is not None:
             return meta
     return None
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：不持有本组其它手势状态（同种状态可再次使用以刷新
     持续时长）；返回错误文案时本次不消耗。"""
-    held = _held_gesture_meta(context.group_id, context.user_id)
+    held = await _held_gesture_meta(context.group_id, context.user_id)
     if held is None or held.item_id == context.item.item_id:
         return None
     return f"你已处于“{held.state_label}”状态，无法使用 {context.item.label}。"
@@ -171,7 +171,7 @@ def _can_use(context: ItemUseContext) -> str | None:
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：获得持续 1 小时的手势状态并发送提示。"""
     meta = _META_BY_ID[context.item.item_id]
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(key=meta.state_key, item_id=meta.item_id),
@@ -208,7 +208,7 @@ def _canceled_prefix(name_a: str, label_a: str, name_b: str, label_b: str) -> st
     return f"（{name_a} 的 {label_a} 与 {name_b} 的 {label_b} 抵消了）\n"
 
 
-def _pair_rule(context: DuelGesturePairContext) -> DuelGesturePairVerdict | None:
+async def _pair_rule(context: DuelGesturePairContext) -> DuelGesturePairVerdict | None:
     """单组手势判定规则：按双方的手势状态判定一组手势的胜负与文案。
 
     单方状态触发时该组手势判该方胜（无论基础猜拳规则如何）；双方都
@@ -217,8 +217,8 @@ def _pair_rule(context: DuelGesturePairContext) -> DuelGesturePairVerdict | None
     获胜）时插入「（<拥有者> 使用了 <道具>）」，双方状态抵消且基础判定
     为平局时插入抵消文案。
     """
-    actor_meta = _held_gesture_meta(context.group_id, context.actor_id)
-    opponent_meta = _held_gesture_meta(context.group_id, context.opponent_id)
+    actor_meta = await _held_gesture_meta(context.group_id, context.actor_id)
+    opponent_meta = await _held_gesture_meta(context.group_id, context.opponent_id)
     draw = context.actor_gesture == context.opponent_gesture
     actor_state = _triggered_meta(actor_meta, context.actor_gesture, draw=draw)
     opponent_state = _triggered_meta(opponent_meta, context.opponent_gesture, draw=draw)

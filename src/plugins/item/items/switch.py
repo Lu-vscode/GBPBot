@@ -55,9 +55,11 @@ _settle_service = require_service(DuelSettleService)
 _switches: set[tuple[int, int, int]] = set()
 
 
-def _find_duel(group_id: int, user_id: int, target_id: int) -> DuelSnapshot | None:
+async def _find_duel(
+    group_id: int, user_id: int, target_id: int
+) -> DuelSnapshot | None:
     """查找使用者与目标成员进行中的决斗快照（不限发起方向与是否已接受）。"""
-    for snapshot in _state_service.list_duels(group_id):
+    for snapshot in await _state_service.list_duels(group_id):
         if {snapshot.challenger_id, snapshot.opponent_id} == {user_id, target_id}:
             return snapshot
     return None
@@ -84,7 +86,7 @@ def _drop_switches(group_id: int, player_a: int, player_b: int) -> None:
         _switches.discard(match)
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：@ 参数、决斗进行中、分数非负与本场未使用过魂迁；
     返回错误文案时本次不消耗。"""
     target_id = context.target_id
@@ -92,9 +94,9 @@ def _can_use(context: ItemUseContext) -> str | None:
         return _USAGE
     if target_id == context.user_id:
         return f"不能对自己使用 {context.item.label}。"
-    if _find_duel(context.group_id, context.user_id, target_id) is None:
+    if await _find_duel(context.group_id, context.user_id, target_id) is None:
         return _NO_DUEL
-    if get_user_score(context.group_id, context.user_id) < 0:
+    if await get_user_score(context.group_id, context.user_id) < 0:
         return f"只有决斗分数非负的成员才能使用 {context.item.label}。"
     if _match_switch(context.group_id, context.user_id, target_id) is not None:
         return _ALREADY_USED
@@ -114,17 +116,17 @@ async def _handle_use(context: ItemUseContext) -> None:
     if target_id is None:
         # 不可达：can_use 已校验参数与目标存在
         return
-    snapshot = _find_duel(context.group_id, context.user_id, target_id)
+    snapshot = await _find_duel(context.group_id, context.user_id, target_id)
     if snapshot is None:
-        # 不可达：can_use 与消耗同处同步段，决斗状态不会在期间改变
+        # 不可达：check 与消耗在同一把群锁内，决斗状态不会在期间改变
         logger.error(
             f"魂迁：消耗后未找到进行中的决斗，道具已退还"
             f"（群 {context.group_id}，成员 {context.user_id}）"
         )
-        add_item(context.group_id, context.user_id, _ITEM_ID)
+        await add_item(context.group_id, context.user_id, _ITEM_ID)
         await context.send(_REFUND_TEXT)
         return
-    # 同步段登记，防止并发指令在同一场决斗中重复使用
+    # 登记在群锁内完成，防止并发指令在同一场决斗中重复使用
     _switches.add((context.group_id, context.user_id, target_id))
     target_name = _target_name(snapshot, context.user_id)
     await context.send(
@@ -134,14 +136,14 @@ async def _handle_use(context: ItemUseContext) -> None:
     )
 
 
-def _exchange_scores(
+async def _exchange_scores(
     group_id: int, user_id: int, user_name: str, target_id: int, target_name: str
 ) -> tuple[int, int]:
     """交换双方的决斗分数，返回 (使用者原分数, 对象原分数)。"""
-    user_score = get_user_score(group_id, user_id)
-    target_score = get_user_score(group_id, target_id)
-    add_user_score(group_id, target_id, target_name, user_score - target_score)
-    add_user_score(group_id, user_id, user_name, target_score - user_score)
+    user_score = await get_user_score(group_id, user_id)
+    target_score = await get_user_score(group_id, target_id)
+    await add_user_score(group_id, target_id, target_name, user_score - target_score)
+    await add_user_score(group_id, user_id, user_name, target_score - user_score)
     return user_score, target_score
 
 
@@ -170,9 +172,9 @@ async def _settle(event: DuelEvent) -> bool:
     else:
         user_name = event.opponent_name
         target_name = event.challenger_name
-    # 同步段完成分数交换，再发送结算消息
+    # 分数交换在多条语句间完成，由调用方在同一场结算内串行执行
     if event.winner_id == user_id:
-        user_score, target_score = _exchange_scores(
+        user_score, target_score = await _exchange_scores(
             event.group_id, user_id, user_name, target_id, target_name
         )
         text = (

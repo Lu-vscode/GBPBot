@@ -1,11 +1,10 @@
 """签到插件。
 
 在群聊中发送 `/sign` 进行每日签到：每人每天在本群可签到一次（以本地
-时区的自然日为准，0 点后重置），签到记录使用 localstore 长期存储在
-本地且按群隔离（群号 -> 成员 QQ 号 -> 逐条签到记录，每条含签到日期
-与获得的道具编号；旧格式的汇总记录在加载时自动迁移、仅保留最新
-一条）；签到成功可获得决斗分数奖励（默认 1 分，SIGN_SCORE 可配置）
-与一件随机道具。
+时区的自然日为准，0 点后重置）。签到记录落在数据库表 `gbp_sign_record`，
+以 `(群号, 成员 QQ 号, 签到日期)` 唯一约束保证当天只有一条记录（并发
+签到由插入冲突判定，不依赖进程内同步段）；签到成功可获得决斗分数奖励
+（默认 1 分，SIGN_SCORE 可配置）与一件随机道具。
 
 与决斗、道具插件的交互通过跨插件服务实现（见 _shared/services.py）：
 加载时用 require("duel")、require("item") 声明依赖，确保分数与道具
@@ -14,9 +13,8 @@
 诅咒由道具服务在签到文案之后完成信息播报与自动使用）。
 """
 
-import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from nonebot import get_plugin_config, logger, on_command
 from nonebot.adapters.onebot.v11 import (
@@ -28,8 +26,14 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.plugin import PluginMetadata, require
 from nonebot.rule import is_type
-from nonebot_plugin_localstore import get_plugin_data_file
 from pydantic import BaseModel, ValidationInfo, field_validator
+
+require("nonebot_plugin_orm")
+
+from nonebot_plugin_orm import Model, get_session
+from sqlalchemy import Integer, String, UniqueConstraint, func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Mapped, mapped_column
 
 from src.plugins._shared.services import (
     DuelScoreService,
@@ -39,6 +43,9 @@ from src.plugins._shared.services import (
     require_service,
 )
 
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
+
 __plugin_meta__ = PluginMetadata(
     name="签到",
     description="群聊每日签到，每人每天一次，签到成功可获得决斗分数奖励与随机道具",
@@ -46,6 +53,31 @@ __plugin_meta__ = PluginMetadata(
     type="application",
     supported_adapters={"~onebot.v11"},
 )
+
+
+class SignRecord(Model):
+    """成员在单个群内的一次签到记录（每人每天最多一条）。"""
+
+    __tablename__ = "gbp_sign_record"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", "date", name="uq_gbp_sign_record_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    """自增主键。"""
+
+    group_id: Mapped[int] = mapped_column(Integer)
+    """群号。"""
+
+    user_id: Mapped[int] = mapped_column(Integer)
+    """成员 QQ 号。"""
+
+    date: Mapped[str] = mapped_column(String(10))
+    """签到日期（本地时区 YYYY-MM-DD）。"""
+
+    item_id: Mapped[str] = mapped_column(String(3), default="", server_default="")
+    """本次签到获得的道具编号（抽取失败为空字符串）。"""
+
 
 # 每次签到获得的决斗分数默认值
 _DEFAULT_SCORE_GAIN = 1
@@ -153,124 +185,6 @@ def _text(key: str, **kwargs: Any) -> str:
     return _texts[key].format(**kwargs)
 
 
-# 签到记录存储文件（localstore 插件数据目录）
-_SIGN_FILE = get_plugin_data_file("sign_ins.json")
-
-
-def _normalize_entry(entry: Any) -> dict[str, str] | None:
-    """校验签到记录中的单条记录（{date, item}），无效时返回 None。"""
-    if not isinstance(entry, dict):
-        return None
-    date = entry.get("date")
-    if not isinstance(date, str):
-        return None
-    return {"date": date, "item": str(entry.get("item") or "")}
-
-
-def _normalize_member(
-    user_id: Any, member_data: Any
-) -> tuple[int, list[dict[str, str]]] | None:
-    """校验签到记录中的单个成员记录，返回 (QQ 号, 逐条签到记录)。
-
-    新格式为逐条记录的数组；旧格式（name/date/count/item 的汇总对象）
-    迁移为仅保留最新的一条记录。无效时返回 None。
-    """
-    if not isinstance(user_id, str) or not user_id.isdigit():
-        return None
-    if isinstance(member_data, dict):
-        entry = _normalize_entry(member_data)
-        if entry is None:
-            return None
-        return int(user_id), [entry]
-    if not isinstance(member_data, list):
-        return None
-    entries = [
-        entry
-        for entry in (_normalize_entry(raw) for raw in member_data)
-        if entry is not None
-    ]
-    if not entries:
-        return None
-    return int(user_id), entries
-
-
-def _normalize_group(
-    group_id: Any, group_data: Any
-) -> tuple[int, dict[int, list[dict[str, str]]]] | None:
-    """校验签到记录中的单个群记录，返回 (群号, 群内成员记录)。"""
-    if not isinstance(group_id, str) or not group_id.isdigit():
-        return None
-    if not isinstance(group_data, dict):
-        return None
-    members = [
-        member
-        for member in (
-            _normalize_member(user_id, member_data)
-            for user_id, member_data in group_data.items()
-        )
-        if member is not None
-    ]
-    if not members:
-        return None
-    return int(group_id), dict(members)
-
-
-def _load_signs() -> tuple[dict[int, dict[int, list[dict[str, str]]]], bool]:
-    """从本地文件读取签到记录，文件不存在或损坏时返回 (空记录, False)。
-
-    返回的第二个元素表示原始数据是否含有旧格式（成员记录为 name/date/
-    count/item 汇总对象）的记录；为 True 时应把仅保留每人最新一条的
-    规范化结果写回文件。
-    """
-    if not _SIGN_FILE.exists():
-        return {}, False
-    try:
-        raw = json.loads(_SIGN_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning(f"读取签到记录失败，本次将视为无签到记录：{exc}")
-        return {}, False
-    if not isinstance(raw, dict):
-        logger.warning("签到记录格式异常（应为 JSON 对象），本次将视为无签到记录")
-        return {}, False
-    legacy = any(
-        isinstance(member_data, dict)
-        for group_data in raw.values()
-        if isinstance(group_data, dict)
-        for member_data in group_data.values()
-    )
-    normalized = [
-        item
-        for item in (
-            _normalize_group(group_id, group_data)
-            for group_id, group_data in raw.items()
-        )
-        if item is not None
-    ]
-    return dict(normalized), legacy
-
-
-def _save_signs() -> None:
-    """将签到记录写入本地文件，写入失败时仅记录错误。"""
-    try:
-        _SIGN_FILE.write_text(
-            json.dumps(_signs, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        logger.error(f"写入签到记录失败，本次修改未保存：{exc}")
-
-
-# 签到记录：群号 -> 成员 QQ 号 -> 逐条签到记录列表，每条记录含 date
-# 签到日期（本地时区 YYYY-MM-DD）与 item 获得的道具编号（抽取失败为 ""）
-_signs, _migrated = _load_signs()
-if _signs:
-    _member_count = sum(len(members) for members in _signs.values())
-    logger.info(f"已加载签到记录，共 {len(_signs)} 个群、{_member_count} 名成员")
-if _migrated:
-    # 旧格式（每人一条汇总记录）迁移后仅保留每人最新一条，立即写回磁盘
-    logger.info("签到记录已由旧格式迁移，每个成员仅保留最新一条记录")
-    _save_signs()
-
 # 加载时依赖声明：签到奖励由决斗插件的分数服务发放、道具由道具插件的
 # 道具服务发放（见 _shared/services.py）。require 保证提供方插件先完成
 # 加载、服务已完成注册；服务缺失时插件加载失败并给出明确日志
@@ -296,37 +210,105 @@ def _sender_display_name(event: GroupMessageEvent) -> str:
     return card or nickname or f"QQ {event.user_id}"
 
 
-def _try_sign(
+# 奖励发放阶段的异常（单个步骤失败时只记日志，不回滚已写入的签到记录）
+_REWARD_ERRORS = (Exception,)
+
+
+async def _insert_record(group_id: int, user_id: int, date: str) -> bool:
+    """写入当天签到记录，返回是否写入成功（当天已签到时返回 False）。
+
+    唯一约束（群号、成员 QQ 号、日期）保证同日只有一条记录，并发签到
+    时只有一个事件能插入成功，其余按"今天已签到"处理，不依赖进程内
+    同步段。记录先以空道具编号写入，奖励发放后回填。
+    """
+    statement = (
+        sqlite_insert(SignRecord)
+        .values(group_id=group_id, user_id=user_id, date=date, item_id="")
+        .on_conflict_do_nothing(
+            index_elements=[SignRecord.group_id, SignRecord.user_id, SignRecord.date]
+        )
+    )
+    async with get_session() as session, session.begin():
+        result = await session.execute(statement)
+    return bool(cast("CursorResult[Any]", result).rowcount)
+
+
+async def _set_record_item(
+    group_id: int, user_id: int, date: str, item_id: str
+) -> None:
+    """把当天签到记录的道具编号回填为实际获得的道具编号。"""
+    async with get_session() as session, session.begin():
+        await session.execute(
+            update(SignRecord)
+            .where(
+                SignRecord.group_id == group_id,
+                SignRecord.user_id == user_id,
+                SignRecord.date == date,
+            )
+            .values(item_id=item_id)
+        )
+
+
+async def _count_records(group_id: int, user_id: int) -> int:
+    """返回成员在本群的累计签到次数。"""
+    statement = (
+        select(func.count())
+        .select_from(SignRecord)
+        .where(
+            SignRecord.group_id == group_id,
+            SignRecord.user_id == user_id,
+        )
+    )
+    async with get_session() as session:
+        return int(await session.scalar(statement) or 0)
+
+
+async def _try_sign(
     group_id: int, user_id: int, name: str, date: str
 ) -> tuple[bool, GrantedItem | None, int]:
-    """尝试为成员签到（在同步段调用，避免并发事件重复签到）。
+    """尝试为成员签到，返回 (是否签到成功, 道具发放结果, 获得的决斗分数)。
 
-    当天尚未签到时：追加一条签到记录、向分数服务发放决斗分数（基础
-    分数与道具加成之和，加成见 SignScoreBonusService）、经道具服务
-    发放随机道具（编号写入本次记录，抽取失败为 ""），最后落盘并返回
-    (True, 道具发放结果或 None, 本次获得的决斗分数)；当天已签到时：
-    不改变任何状态，返回 (False, None, 0)。
+    先写入当天签到记录（唯一约束判定是否重复签到）；写入成功后向分数
+    服务发放决斗分数（基础分数与道具加成之和，加成见
+    SignScoreBonusService）、经道具服务发放随机道具并回填本次记录的
+    道具编号。奖励发放中途出错时保留"当天已签到但未发奖"的状态（比
+    重复领奖安全）并只记录错误日志；当天已签到时不做任何修改，返回
+    (False, None, 0)。
     """
-    group = _signs.setdefault(group_id, {})
-    records = group.setdefault(user_id, [])
-    if any(record["date"] == date for record in records):
+    if not await _insert_record(group_id, user_id, date):
         return False, None, 0
-    records.append({"date": date, "item": ""})
-    gain = _score_gain + _score_bonus_service.extra_score(group_id, user_id)
-    _score_service.add_score(group_id, user_id, name, gain)
-    granted = _item_service.grant_random(group_id, user_id, name)
-    if granted is not None:
-        records[-1]["item"] = granted.item_id
-    _save_signs()
+    gain = _score_gain
+    try:
+        gain += await _score_bonus_service.extra_score(group_id, user_id)
+    except _REWARD_ERRORS as exc:
+        logger.error(f"签到分数加成的服务调用出错，本次按基础分数发放：{exc!r}")
+    awarded = 0
+    granted: GrantedItem | None = None
+    try:
+        await _score_service.add_score(group_id, user_id, name, gain)
+        awarded = gain
+        granted = await _item_service.grant_random(group_id, user_id, name)
+        if granted is not None:
+            await _set_record_item(group_id, user_id, date, granted.item_id)
+    except _REWARD_ERRORS as exc:
+        logger.error(
+            f"群 {group_id} 成员 {user_id}（{name}）的签到奖励发放失败，"
+            f"当天记录已写入且不补发：{exc!r}"
+        )
+    try:
+        total = await _count_records(group_id, user_id)
+    except _REWARD_ERRORS as exc:
+        logger.error(f"读取累计签到次数失败（群 {group_id}，成员 {user_id}）：{exc!r}")
+        total = 0
     if granted is None:
         item_text = "，道具抽取失败"
     else:
         item_text = f"，获得道具 {granted.item_id} {granted.item_name}"
     logger.info(
         f"群 {group_id} 成员 {user_id}（{name}）签到成功"
-        f"（累计 {len(records)} 次），决斗分数+{gain}{item_text}"
+        f"（累计 {total} 次），决斗分数+{awarded}{item_text}"
     )
-    return True, granted, gain
+    return True, granted, awarded
 
 
 async def _send_text(
@@ -353,8 +335,8 @@ sign_cmd = on_command("sign", rule=is_type(GroupMessageEvent))
 async def handle_sign(bot: Bot, event: GroupMessageEvent) -> None:
     """处理 /sign 命令：每日签到，成功时发放决斗分数与随机道具。"""
     name = _sender_display_name(event)
-    # 同步段：判定并更新记录、发放奖励与道具，避免并发事件在判定与更新之间插入
-    signed, granted, gain = _try_sign(
+    # 当天唯一性由记录的唯一约束保证：并发签到只有一个事件能写入记录
+    signed, granted, gain = await _try_sign(
         event.group_id, event.user_id, name, _current_date()
     )
     if not signed:

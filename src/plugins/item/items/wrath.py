@@ -82,22 +82,22 @@ _FOOL_FIRST_COST = 1
 _OMENS = ("彗星袭月", "白虹贯日", "苍鹰击于殿上")
 
 
-def _can_use_fool(context: ItemUseContext) -> str | None:
+async def _can_use_fool(context: ItemUseContext) -> str | None:
     """庸夫之怒的使用前校验：群内存在决斗高分榜第一名；返回错误文案时不消耗。"""
-    if get_highest_score_user(context.group_id) is None:
+    if await get_highest_score_user(context.group_id) is None:
         return "当前没有位列决斗高分榜第一名的成员。"
     return None
 
 
 async def _handle_fool(context: ItemUseContext) -> None:
     """庸夫之怒：自己 -80，使用前确定的高分榜第一名 -1（可能为同一人）。"""
-    first_id = get_highest_score_user(context.group_id)
+    first_id = await get_highest_score_user(context.group_id)
     if first_id is None:
         # 不可达：can_use 与消耗同处同步段，第一名不会在期间消失
         logger.error(
             f"庸夫之怒：消耗后群 {context.group_id} 没有决斗高分榜第一名，道具已退还"
         )
-        add_item(context.group_id, context.user_id, context.item.item_id)
+        await add_item(context.group_id, context.user_id, context.item.item_id)
         await context.send("使用失败：当前没有位列决斗高分榜第一名的成员，道具已退还。")
         return
     if first_id == context.user_id:
@@ -106,8 +106,8 @@ async def _handle_fool(context: ItemUseContext) -> None:
         first_name = await member_display_name(
             context.bot, context.group_id, first_id, _NICKNAME_MAX_LENGTH
         )
-    context.add_score(-_FOOL_SELF_COST)
-    add_user_score(context.group_id, first_id, first_name, -_FOOL_FIRST_COST)
+    await context.add_score(-_FOOL_SELF_COST)
+    await add_user_score(context.group_id, first_id, first_name, -_FOOL_FIRST_COST)
     await context.send(
         f"{context.user_name} 以头抢地，{first_name} 跄。\n\n"
         f"{context.user_name} 决斗分数-{_FOOL_SELF_COST}，"
@@ -115,15 +115,15 @@ async def _handle_fool(context: ItemUseContext) -> None:
     )
 
 
-def _can_use_king(context: ItemUseContext) -> str | None:
+async def _can_use_king(context: ItemUseContext) -> str | None:
     """天子之怒的使用前校验：@ 参数、高分榜条件与目标分数；返回错误文案时不消耗。"""
     if context.args or context.target_id is None:
         return f"请 @ 一位群成员，用法：/item.use {_ID_KING} @群成员"
     if context.target_id == context.user_id:
         return f"不能对自己使用 {context.item.label}。"
-    if get_highest_score_user(context.group_id) != context.user_id:
+    if await get_highest_score_user(context.group_id) != context.user_id:
         return f"只有位列决斗高分榜第一名的成员才能使用 {context.item.label}。"
-    if get_user_score(context.group_id, context.target_id) < 0:
+    if await get_user_score(context.group_id, context.target_id) < 0:
         return f"{context.item.label} 只能诛杀决斗分数非负的成员。"
     return None
 
@@ -137,8 +137,8 @@ async def _handle_king(context: ItemUseContext) -> None:
     target_name = await member_display_name(
         context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
     )
-    old = get_user_score(context.group_id, target_id)
-    add_user_score(context.group_id, target_id, target_name, -1 - old)
+    old = await get_user_score(context.group_id, target_id)
+    await add_user_score(context.group_id, target_id, target_name, -1 - old)
     await context.send(
         f"{context.user_name} 诛杀了 {target_name}。\n{target_name} 的决斗分数变为-1。"
     )
@@ -148,36 +148,38 @@ async def _handle_king(context: ItemUseContext) -> None:
 _assassinations: set[tuple[int, int, int]] = set()
 
 
-def _find_duel(group_id: int, user_id: int, target_id: int) -> DuelSnapshot | None:
+async def _find_duel(
+    group_id: int, user_id: int, target_id: int
+) -> DuelSnapshot | None:
     """查找使用者与目标成员进行中的决斗快照（不限发起方向与是否已接受）。"""
-    for snapshot in _state_service.list_duels(group_id):
+    for snapshot in await _state_service.list_duels(group_id):
         if {snapshot.challenger_id, snapshot.opponent_id} == {user_id, target_id}:
             return snapshot
     return None
 
 
-def _assassination_error(context: ItemUseContext, target_id: int) -> str | None:
+async def _assassination_error(context: ItemUseContext, target_id: int) -> str | None:
     """布衣之怒的刺杀条件校验：自身分数为 0、目标位列高分榜第一名、
     双方存在进行中的决斗且未重复发起；不满足时返回错误文案。"""
-    if get_user_score(context.group_id, context.user_id) != 0:
+    if await get_user_score(context.group_id, context.user_id) != 0:
         return f"只有决斗分数为 0 的成员才能使用 {context.item.label}。"
-    if get_highest_score_user(context.group_id) != target_id:
+    if await get_highest_score_user(context.group_id) != target_id:
         return f"只有位列决斗高分榜第一名的成员才能被 {context.item.label} 刺杀。"
-    if _find_duel(context.group_id, context.user_id, target_id) is None:
+    if await _find_duel(context.group_id, context.user_id, target_id) is None:
         return "你与该成员没有进行中的决斗。"
     if (context.group_id, context.user_id, target_id) in _assassinations:
         return "你已在该决斗中发起过刺杀。"
     return None
 
 
-def _can_use_commoner(context: ItemUseContext) -> str | None:
+async def _can_use_commoner(context: ItemUseContext) -> str | None:
     """布衣之怒的使用前校验：@ 参数与刺杀条件；返回错误文案时不消耗。"""
     target_id = context.target_id
     if context.args or target_id is None:
         return f"请 @ 一位群成员，用法：/item.use {_ID_COMMONER} @群成员"
     if target_id == context.user_id:
         return f"不能对自己使用 {context.item.label}。"
-    return _assassination_error(context, target_id)
+    return await _assassination_error(context, target_id)
 
 
 async def _handle_commoner(context: ItemUseContext) -> None:
@@ -186,16 +188,16 @@ async def _handle_commoner(context: ItemUseContext) -> None:
     if target_id is None:
         # 不可达：can_use 已校验参数与目标存在
         return
-    # 同步段登记刺杀，防止并发指令在同一场决斗中重复发起
+    # 登记在群锁内完成，防止并发指令在同一场决斗中重复发起
     _assassinations.add((context.group_id, context.user_id, target_id))
     await context.send(f"{context.user_name} 挺剑而起。")
 
 
-def _set_score(group_id: int, user_id: int, name: str, score: int) -> None:
+async def _set_score(group_id: int, user_id: int, name: str, score: int) -> None:
     """把成员的决斗分数设为指定值。"""
-    current = get_user_score(group_id, user_id)
+    current = await get_user_score(group_id, user_id)
     if current != score:
-        add_user_score(group_id, user_id, name, score - current)
+        await add_user_score(group_id, user_id, name, score - current)
 
 
 def _match_assassination(
@@ -244,16 +246,16 @@ async def _settle_commoner(event: DuelEvent) -> bool:
     else:
         user_name = event.opponent_name
         target_name = event.challenger_name
-    # 同步段完成分数改写，再发送结算消息
+    # 分数改写逐条写入，由调用方在同一场结算内串行执行
     if event.winner_id == user_id:
-        _set_score(event.group_id, user_id, user_name, -1)
-        _set_score(event.group_id, target_id, target_name, -1)
+        await _set_score(event.group_id, user_id, user_name, -1)
+        await _set_score(event.group_id, target_id, target_name, -1)
         text = (
             f"{user_name} 刺 {target_name}，{random.choice(_OMENS)}。\n\n"
             f"{user_name} 和 {target_name} 的决斗分数变为-1。"
         )
     else:
-        _set_score(event.group_id, user_id, user_name, -1)
+        await _set_score(event.group_id, user_id, user_name, -1)
         text = (
             f"{target_name} 环柱走，{user_name} 废。\n\n"
             f"{user_name} 决斗分数变为-1，{target_name} 决斗分数不变。"

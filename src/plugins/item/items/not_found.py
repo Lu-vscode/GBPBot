@@ -42,9 +42,9 @@ _BLOCK_REASON = "404 Not Found"
 _event_service = require_service(DuelEventService)
 
 
-def _has_state(group_id: int, user_id: int) -> bool:
+async def _has_state(group_id: int, user_id: int) -> bool:
     """判断成员是否持有有效的「404」状态（已过期等待清理的不计入）。"""
-    return get_state(group_id, user_id, _STATE_KEY) is not None
+    return await get_state(group_id, user_id, _STATE_KEY) is not None
 
 
 async def _on_duel_event(event: DuelEvent) -> None:
@@ -52,7 +52,7 @@ async def _on_duel_event(event: DuelEvent) -> None:
     状态时阻断本次发起（设置 block_reason，决斗不会被创建）。"""
     if event.kind is not DuelEventKind.CHALLENGE:
         return
-    if _has_state(event.group_id, event.challenger_id) or _has_state(
+    if await _has_state(event.group_id, event.challenger_id) or await _has_state(
         event.group_id, event.opponent_id
     ):
         event.block_reason = _BLOCK_REASON
@@ -67,7 +67,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     先登记状态再发送提示：提示经发送排队期间状态已生效，期间发起的
     决斗也能被正常阻断。
     """
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(key=_STATE_KEY, item_id=_ITEM_ID),

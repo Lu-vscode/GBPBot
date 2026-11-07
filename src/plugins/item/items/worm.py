@@ -145,7 +145,7 @@ def _as_group_id(value: Any) -> int | None:
     return None
 
 
-def _collect_group_names(group_id: int) -> tuple[dict[str, str], float]:
+async def _collect_group_names(group_id: int) -> tuple[dict[str, str], float]:
     """返回群内状态持有者的显示名 -> 替换文案映射与最早过期时刻。
 
     「区」与「龙」两种状态的持有者都会改写显示名：先收集「区」再覆盖
@@ -158,7 +158,7 @@ def _collect_group_names(group_id: int) -> tuple[dict[str, str], float]:
         (_STATE_KEY, _WORM_REPLACEMENT),
         (_DRAGON_STATE_KEY, _DRAGON_REPLACEMENT),
     ):
-        for _, state in list_state_holders(group_id, key):
+        for _, state in await list_state_holders(group_id, key):
             if state.expires_at is not None:
                 deadline = min(deadline, state.expires_at)
             raw = state.data.get("names")
@@ -170,7 +170,7 @@ def _collect_group_names(group_id: int) -> tuple[dict[str, str], float]:
     return replacements, deadline
 
 
-def _group_rewriter(group_id: int) -> _GroupRewriter | None:
+async def _group_rewriter(group_id: int) -> _GroupRewriter | None:
     """返回群内显示名的改写快照，没有状态持有者时返回 None。
 
     结果按状态变更序号与最早过期时刻缓存：状态未变化且没有状态过期
@@ -183,7 +183,7 @@ def _group_rewriter(group_id: int) -> _GroupRewriter | None:
     cached = _group_rewriters.get(group_id)
     if cached is not None and cached[0] == version and now < cached[1]:
         return cached[2]
-    replacements, deadline = _collect_group_names(group_id)
+    replacements, deadline = await _collect_group_names(group_id)
     rewriter = None
     if replacements:
         names = sorted(replacements, key=len, reverse=True)
@@ -228,7 +228,7 @@ def _rewritten_message(
     return Message(segments)
 
 
-def _rewrite_send_data(data: dict[str, Any]) -> None:
+async def _rewrite_send_data(data: dict[str, Any]) -> None:
     """改写一次群发送调用参数中的文本（send_msg / send_group_msg）。
 
     message 参数为 Message 时以替换后的新消息覆盖、为纯文本字符串
@@ -237,7 +237,7 @@ def _rewrite_send_data(data: dict[str, Any]) -> None:
     group_id = _as_group_id(data.get("group_id"))
     if group_id is None:
         return
-    rewriter = _group_rewriter(group_id)
+    rewriter = await _group_rewriter(group_id)
     if rewriter is None:
         return
     message = data.get("message")
@@ -266,7 +266,7 @@ def _rewrite_content_segments(
             segment_data["text"] = _rewrite_text(text, rewriter)
 
 
-def _rewrite_forward_data(data: dict[str, Any]) -> None:
+async def _rewrite_forward_data(data: dict[str, Any]) -> None:
     """改写一次群合并转发调用参数中各节点的文本段。
 
     节点结构为本次调用新构造（见 _shared/onebot.py 的
@@ -276,7 +276,7 @@ def _rewrite_forward_data(data: dict[str, Any]) -> None:
     group_id = _as_group_id(data.get("group_id"))
     if group_id is None:
         return
-    rewriter = _group_rewriter(group_id)
+    rewriter = await _group_rewriter(group_id)
     if rewriter is None:
         return
     messages = data.get("messages")
@@ -305,9 +305,9 @@ async def _rewrite_outgoing(_bot: BaseBot, api: str, data: dict[str, Any]) -> No
     if api not in _REWRITE_APIS:
         return
     if api == "send_group_forward_msg":
-        _rewrite_forward_data(data)
+        await _rewrite_forward_data(data)
     else:
-        _rewrite_send_data(data)
+        await _rewrite_send_data(data)
 
 
 async def _handle_worm_use(context: ItemUseContext) -> None:
@@ -320,7 +320,7 @@ async def _handle_worm_use(context: ItemUseContext) -> None:
     await context.send(
         f"{context.user_name} 变成了“区”！\n1天之内，Bot 会一直称呼 TA 为“区宝宝”。"
     )
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(
@@ -349,7 +349,7 @@ register_item(
 )
 
 
-def _pick_grant_targets(group_id: int, user_id: int) -> list[int]:
+async def _pick_grant_targets(group_id: int, user_id: int) -> list[int]:
     """随机选取最多三名决斗分数非零的其它群成员（不含自己与机器人）。
 
     候选取自决斗分数总榜（0 分或没有分数记录的成员不在榜上）；候选
@@ -358,7 +358,7 @@ def _pick_grant_targets(group_id: int, user_id: int) -> list[int]:
     bots = get_bot_list()
     candidates = [
         entry_user
-        for entry_user, _name, _score in get_rank_entries(group_id)
+        for entry_user, _name, _score in await get_rank_entries(group_id)
         if entry_user != user_id and entry_user not in bots
     ]
     return random.sample(candidates, min(_GRANT_COUNT, len(candidates)))
@@ -465,10 +465,10 @@ async def _handle_advent_use(context: ItemUseContext) -> None:
             "区从天降：道具 678 未注册，已退还"
             f"（群 {context.group_id}，成员 {context.user_id}）"
         )
-        add_item(context.group_id, context.user_id, context.item.item_id)
+        await add_item(context.group_id, context.user_id, context.item.item_id)
         await context.send("使用失败：道具 678 不存在，道具已退还。")
         return
-    targets = _pick_grant_targets(context.group_id, context.user_id)
+    targets = await _pick_grant_targets(context.group_id, context.user_id)
     _schedule_grants(context.group_id, targets)
     lines = [f"{context.user_name} 使用了 {context.item.label}。", "感染相生了……"]
     if targets:
@@ -507,12 +507,12 @@ register_item(
 _USAGE_WRATH = f"请 @ 一位群成员，用法：/item.use {_WRATH_ID} @群成员"
 
 
-def _can_use_wrath(context: ItemUseContext) -> str | None:
+async def _can_use_wrath(context: ItemUseContext) -> str | None:
     """使用前校验：@ 使用对象、自身的“区”状态与目标；返回错误文案时本次不消耗。"""
     target_id = context.target_id
     if context.args or target_id is None:
         return _USAGE_WRATH
-    if get_state(context.group_id, context.user_id, _STATE_KEY) is None:
+    if await get_state(context.group_id, context.user_id, _STATE_KEY) is None:
         return f"只有拥有“区”状态的成员才能使用 {context.item.label}。"
     if target_id in get_bot_list() or context.bot.self_id == str(target_id):
         return f"不能对机器人使用 {context.item.label}。"
@@ -532,7 +532,7 @@ async def _handle_wrath_use(context: ItemUseContext) -> None:
             "狂区之怒：道具 678 未注册，已退还"
             f"（群 {context.group_id}，成员 {context.user_id}）"
         )
-        add_item(context.group_id, context.user_id, context.item.item_id)
+        await add_item(context.group_id, context.user_id, context.item.item_id)
         await context.send("使用失败：道具 678 不存在，道具已退还。")
         return
     if target_id == context.user_id:
@@ -567,9 +567,9 @@ register_item(
 )
 
 
-def _can_use_dragon(context: ItemUseContext) -> str | None:
+async def _can_use_dragon(context: ItemUseContext) -> str | None:
     """使用前校验：必须持有「区」状态；返回错误文案时本次不消耗。"""
-    if get_state(context.group_id, context.user_id, _STATE_KEY) is None:
+    if await get_state(context.group_id, context.user_id, _STATE_KEY) is None:
         return f"只有拥有“区”状态的成员才能使用 {context.item.label}。"
     return None
 
@@ -585,11 +585,11 @@ async def _handle_dragon_use(context: ItemUseContext) -> None:
     group_id = context.group_id
     user_id = context.user_id
     user_name = context.user_name
-    holders = len(list_state_holders(group_id, _STATE_KEY))
+    holders = len(await list_state_holders(group_id, _STATE_KEY))
     chance = f"本群 {holders} 名“区”宝宝，蜕变成功的概率为 {holders}%。"
     if random.random() * 100 < holders:
-        remove_state(group_id, user_id, _STATE_KEY)
-        add_state(
+        await remove_state(group_id, user_id, _STATE_KEY)
+        await add_state(
             group_id,
             user_id,
             state=ItemState(key=_TRUE_DRAGON_STATE_KEY, item_id=_DRAGON_ID),
@@ -655,7 +655,7 @@ dragon_cmd = on_command(f"item.{_DRAGON_ID}.dragon", rule=is_type(GroupMessageEv
 @dragon_cmd.handle()
 async def handle_item_dragon(bot: Bot, event: GroupMessageEvent) -> None:
     """处理 /item.680.dragon 命令：获得持续 1 天的「龙」状态。"""
-    if get_state(event.group_id, event.user_id, _TRUE_DRAGON_STATE_KEY) is None:
+    if await get_state(event.group_id, event.user_id, _TRUE_DRAGON_STATE_KEY) is None:
         # 不具有“真龙”状态：静默失败
         return
     name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
@@ -667,7 +667,7 @@ async def handle_item_dragon(bot: Bot, event: GroupMessageEvent) -> None:
         event.message_id,
         label="道具消息",
     )
-    add_state(
+    await add_state(
         event.group_id,
         event.user_id,
         state=ItemState(
@@ -685,11 +685,11 @@ debug_cmd = on_command(f"item.{_DRAGON_ID}.debug", rule=is_type(GroupMessageEven
 @debug_cmd.handle()
 async def handle_item_debug(bot: Bot, event: GroupMessageEvent) -> None:
     """处理 /item.680.debug 命令：清除自己的「区」状态（须持有「真龙」）。"""
-    if get_state(event.group_id, event.user_id, _TRUE_DRAGON_STATE_KEY) is None:
+    if await get_state(event.group_id, event.user_id, _TRUE_DRAGON_STATE_KEY) is None:
         # 不具有“真龙”状态：静默失败
         return
     name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
-    if not remove_state(event.group_id, event.user_id, _STATE_KEY):
+    if not await remove_state(event.group_id, event.user_id, _STATE_KEY):
         await send_group_text(
             bot,
             event.group_id,

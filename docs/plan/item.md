@@ -29,12 +29,15 @@ src/plugins/
 │   ├── services.py   # 跨插件服务契约与注册中心（本次大幅扩展）
 │   ├── config.py     # 新增：跨插件共享配置（BOT_LIST 机器人名单）
 │   └── onebot.py     # 新增：群聊消息发送、群昵称获取/截断等共享工具
-├── duel.py           # 重构：注册 3 项服务、发布 8 类事件、复用 _shared 工具与配置
+├── duel/             # 重构（已拆包为包插件）：按职责拆成 _models（分数表）、_scores（异步分数
+│                     #   服务）、_events、_flow、_gestures、_judgement、_messages、_services、
+│                     #   _state、_limit、_config，详见各模块 docstring
 ├── item/             # 新增：道具插件包（NoneBot 包插件，模块名 src.plugins.item）
-│   ├── __init__.py   # 主模块：配置、存储、指令、抽取/合成/交换/使用/诅咒流程、服务注册、定时清理
+│   ├── __init__.py   # 主模块：配置、指令、抽取/合成/交换/使用/诅咒流程、服务注册、定时清理
 │   ├── _framework.py # 道具定义/注册表、品质与分类枚举、功能标签、使用上下文、状态 API、抽取代数
 │   ├── _durability.py # 耐久型道具的公共逻辑（副本耗损、可交易数量、详情耐久、行为块工厂）
-│   ├── _storage.py   # inventory.json 与 states.json 的加载/保存
+│   ├── _models.py    # ORM 模型：gbp_item_inventory、gbp_item_state
+│   ├── _store.py     # 两张表的异步读写原语（单事务、按群锁串行化）
 │   └── items/
 │       ├── __init__.py  # 自动发现并导入本包下所有道具模块
 │       ├── plus_one.py  # 道具 111「+1」
@@ -48,19 +51,33 @@ src/plugins/
 
 ## 4. 数据与存储
 
-由 localstore 解析到 `data/item/`（`LOCALSTORE_USE_CWD` 下为 `cwd/data/item/`）：
+持久数据由 nonebot-plugin-orm 管理，全部落在 SQLite 数据库
+`data/nonebot_plugin_orm/db.sqlite3`（路径由 `.env` 的 `SQLALCHEMY_DATABASE_URL` 指定）：
+旧版 `data/item/inventory.json`、`data/item/states.json` 已废弃，由
+`scripts/data/migrate_orm.py` 一次性迁移（旧文件改名归档为 `*.migrated-<时间戳>`）。
+模型定义在 `item/_models.py`，表名统一加 `gbp_` 前缀：
 
-- `inventory.json`：道具库存，`{"<群号>": {"<QQ>": {"<道具编号>": <数量>}}}`
-- `states.json`：道具产生的状态（Buff/永久型等），
-  `{"<群号>": {"<QQ>": [{"key", "item_id", "expires_at", "data"}]}}`
-  - `expires_at` 为 Unix 时间戳（墙钟，重启不丢失），`null` 表示永久
-  - 加载时校验结构，无效条目跳过并记录 warning；过期状态在读取与定时清理时移除
+- `gbp_item_inventory`：道具库存，主键 `(group_id, user_id, item_id)`
+  - `item_id` 为三位数字字符串（`String(3)`）；`count` 为正整数，约束
+    `CHECK (count > 0)` 下推数据库，数量归零即删除条目
+- `gbp_item_state`：道具产生的状态（Buff/永久型等），主键 `(group_id, user_id, state_key)`
+  - 同一成员同键状态重复添加时直接覆盖（UPSERT），不再需要“加载时校验结构、跳过无效条目”
+  - `expires_at` 为 Unix 时间戳（墙钟，重启不丢失）的 `Float`，`NULL` 表示永久；
+    过期清理依赖索引 `ix_gbp_item_state_expires`
+  - `data` 为道具模块自定义的附加数据（JSON 列，须可 JSON 序列化）
+- 读写全部收敛在 `item/_store.py`：每个函数自行开事务
+  （`async with get_session() as session, session.begin()`），复合操作（批量扣减、
+  双方交换、整批写入状态）在单事务内完成，任一步不满足条件整体回滚；
+  “先校验、后修改”的流程（使用、交换、合成）由 `group_lock(group_id)` 按群串行化，
+  取代原先“校验与消耗同处同步段”的假设
+- 过期状态在读取时跳过但不删除，统一由定时任务 `purge_expired_states()` 在事务内
+  删除并返回到期列表，再分发到期效果（同一批状态不会被并发清理重复触发）
 
 内存数据（做好内存管理）：
 
 - 待处理交换 `_exchanges: list[_PendingExchange]`：有效期 10 分钟，**仅存内存**，过期静默删除；
   定时任务（30 秒）与指令入口双重清理
-- 状态数据全量载入内存（随改随存），定时任务清理过期项
+- 状态不再常驻内存：经 `_store.py` 按需读写数据库（热点是单成员单状态，开销可忽）
 
 ## 5. 道具框架（`_framework.py`）
 
@@ -81,12 +98,12 @@ src/plugins/
 ```python
 @dataclass(frozen=True)
 class ItemBehavior:  # 行为钩子（可选；纯展示道具不需要）
-    check: Callable[[ItemUseContext], str | None] | None = None  # 返回错误文案即不可用
+    check: Callable[[ItemUseContext], Awaitable[str | None]] | None = None  # 返回错误文案即不可用
     use: Callable[[ItemUseContext], Awaitable[None]] | None = None
-    consume: Callable[[ItemUseContext], bool] | None = None  # 自定义消耗方式（耐久型等）
-    transferable: Callable[[int, int, str], int] | None = None  # 可交换副本数（群、成员、道具）
+    consume: Callable[[ItemUseContext], Awaitable[bool]] | None = None  # 自定义消耗方式（耐久型等）
+    transferable: Callable[[int, int, str], Awaitable[int]] | None = None  # 可交换副本数（群、成员、道具）
     expire: Callable[[ItemStateExpireContext], Awaitable[None]] | None = None  # 状态到期
-    durability_text: Callable[[int, int, str], str] | None = None  # 动态耐久（群、成员、道具）
+    durability_text: Callable[[int, int, str], Awaitable[str]] | None = None  # 动态耐久（群、成员、道具）
 
 
 @dataclass(frozen=True)
@@ -131,7 +148,7 @@ class ItemUseContext:
     reply_to: int | None     # 触发指令的消息 ID（诅咒自动使用时为 None）
 
     async def send(self, text: str) -> None   # 向群聊发送纯文本消息
-    def add_score(self, delta: int) -> int    # 经决斗分数服务增减分数，返回新分数
+    async def add_score(self, delta: int) -> int    # 经决斗分数服务增减分数（写库），返回新分数
 ```
 
 ### 5.4 抽取
@@ -141,12 +158,14 @@ class ItemUseContext:
 
 ### 5.5 状态 API（供道具模块使用，Buff/永久型道具的基础设施）
 
-- `add_state(group_id, user_id, *, state: ItemState, duration_seconds=None)` 新增/覆盖并落盘
+以下 API 均为异步（底层是数据库读写，函数返回时事务已提交）：
+
+- `await add_state(group_id, user_id, *, state: ItemState, duration_seconds=None)` 新增/覆盖并写库
   （`state` 提供状态键、来源道具与附加数据，`expires_at` 由本函数按 `duration_seconds`
-  计算（传入值不使用），`None` 表示永久）
-- `get_state` / `remove_state` / `list_states`：读取时跳过已过期状态但不删除，
+  计算（传入值不使用），`None` 表示永久）；`add_states` 支持一批状态共用同一过期时刻
+- `await get_state` / `await remove_state` / `await list_states`：读取时跳过已过期状态但不删除，
   过期条目统一交由定时清理分发到期效果（见 `ItemBehavior.expire`）
-- `purge_expired_states()`：定时清理
+- `await purge_expired_states()`：定时清理（事务内删除并返回到期列表）
 - 状态按群隔离；道具模块可据此实现"状态期间的特殊效果/限定指令"（如经行内判定 `get_state`）
 
 ### 5.6 耐久型道具（`_durability.py`）
@@ -175,7 +194,8 @@ class ItemUseContext:
 
 ### 6.2 抽取（签到发放）：`ItemService.grant_random`
 
-- 由 sign 在签到同步段调用（纯登记，不发送消息），返回 `GrantedItem(item_id, item_name) | None`
+- 由 sign 在签到流程中调用（签到本身由 `gbp_sign_record` 的插入冲突判定，不依赖进程内同步段；
+  本调用只做登记，不发送消息），返回 `GrantedItem(item_id, item_name) | None`
 - 普通道具写入库存；黑色诅咒不写入库存（获得即自动使用）
 - sign 发送签到文案后调用 `handle_acquisition`（异步）：
 
@@ -222,6 +242,7 @@ class ItemUseContext:
 ### 7.1 `_shared/services.py` 新增/扩展契约
 
 - `DuelScoreService`（扩展）：`add_score(group_id, user_id, name, delta) -> int`、`get_score(group_id, user_id) -> int`
+  （均为异步接口，直接读写 `gbp_duel_score`；`name` 随分数变化一并更新）
 - `DuelStateService`（新增）：`list_duels(group_id) -> list[DuelSnapshot]`
   （快照含参与者、点数、是否已接受、已出手成员、剩余超时秒数；为只读副本）
 - `DuelEventService`（新增）：`subscribe(handler)` / `unsubscribe(handler)`；
@@ -260,8 +281,8 @@ class ItemUseContext:
 
 ## 8. sign 集成
 
-- 签发流程（同步段）：记录签到 → 发放分数 → 调 `grant_random` 获得道具（编号写入签到
-  记录的 `item` 字段，失败为 `""`，旧记录缺该字段按 `""` 兼容）
+- 签发流程（同一事务 / 群锁内）：写入签到记录（唯一约束判定重复）→ 发放分数 → 调 `grant_random`
+  获得道具（编号回填到签到记录的 `item` 字段，失败为 `""`，旧记录缺该字段按 `""` 兼容）
 - 文案：成功且有道具用 `SIGN_TEXT_SUCCESS`（新增 `{item}` 占位）；未抽到用
   `SIGN_TEXT_SUCCESS_NO_ITEM`（默认"签到成功！决斗分数+{score}，道具抽取失败。"）
 - 发送签到文案后调用 `handle_acquisition`（异步），由其处理诅咒信息与自动使用
@@ -299,7 +320,8 @@ BOT_LIST=[111111, 222222] # 共享配置：机器人名单（所有群通用，�
 ## 11. 测试与验证
 
 - 开发期临时验证脚本（一次性，参考既有习惯、不参考 tests/stress）：
-  重定向 `LOCALSTORE_DATA_DIR` 到临时目录后加载插件，
+  通过 `SQLALCHEMY_DATABASE_URL` 与 `LOCALSTORE_*` 把数据库与数据目录重定向到临时位置，
+  先 `upgrade head` 建表再加载插件，
   覆盖：品质抽取/合成概率解析（默认、归一化、负数、非法值）、空池失败、
   `/item.use`、签到发放（含诅咒消息顺序与记录字段）、合成（成功/失败/诅咒）、
   交换（发起/接受/拒绝/过期/限制）、状态 API、合并转发调用；

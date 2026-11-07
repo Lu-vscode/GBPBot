@@ -33,8 +33,10 @@ if TYPE_CHECKING:
 class DuelScoreService(Protocol):
     """决斗分数服务（由猜拳决斗插件提供）。"""
 
-    def add_score(self, group_id: int, user_id: int, name: str, delta: int) -> int:
-        """更新指定群内成员的决斗分数并写入本地存储，返回更新后的分数。
+    async def add_score(
+        self, group_id: int, user_id: int, name: str, delta: int
+    ) -> int:
+        """更新指定群内成员的决斗分数并写入数据库，返回更新后的分数。
 
         参数:
             group_id: 群号。
@@ -44,7 +46,7 @@ class DuelScoreService(Protocol):
         """
         ...
 
-    def get_score(self, group_id: int, user_id: int) -> int:
+    async def get_score(self, group_id: int, user_id: int) -> int:
         """查询指定群内成员的决斗分数，无记录时返回 0。
 
         参数:
@@ -53,12 +55,12 @@ class DuelScoreService(Protocol):
         """
         ...
 
-    def add_scores(
+    async def add_scores(
         self, group_id: int, entries: Sequence[tuple[int, str, int]]
     ) -> None:
-        """批量更新多名成员的决斗分数并只写入一次本地存储。
+        """批量更新多名成员的决斗分数，全部变化在同一个事务内写入。
 
-        语义等价于按顺序逐个调用 add_score，但只落盘一次；各成员的
+        语义等价于按顺序逐个调用 add_score，但只写一次数据库；各成员的
         变化量仍会依次经过分数改变拦截器链。用于「五谷丰登」等一次
         影响全群成员的道具效果。
 
@@ -68,7 +70,7 @@ class DuelScoreService(Protocol):
         """
         ...
 
-    def lowest_member(self, group_id: int) -> int | None:
+    async def lowest_member(self, group_id: int) -> int | None:
         """返回指定群决斗低分榜第一名成员的 QQ 号，没有负分成员时返回 None。
 
         低分榜的判定与 /duel.rank 的低分榜一致：分数为负的成员按
@@ -80,7 +82,7 @@ class DuelScoreService(Protocol):
         """
         ...
 
-    def highest_member(self, group_id: int) -> int | None:
+    async def highest_member(self, group_id: int) -> int | None:
         """返回指定群决斗高分榜第一名成员的 QQ 号，没有正分成员时返回 None。
 
         高分榜的判定与 /duel.rank 的高分榜一致：分数为正的成员按
@@ -92,7 +94,7 @@ class DuelScoreService(Protocol):
         """
         ...
 
-    def rank_entries(self, group_id: int) -> list[tuple[int, str, int]]:
+    async def rank_entries(self, group_id: int) -> list[tuple[int, str, int]]:
         """返回指定群决斗分数总榜的全部条目 (QQ 号, 昵称, 分数)。
 
         总榜为决斗高分榜与反转的决斗低分榜的拼接：全部非零分数的
@@ -105,7 +107,7 @@ class DuelScoreService(Protocol):
         ...
 
 
-ScoreInterceptor = Callable[[int, int, str, int], int]
+ScoreInterceptor = Callable[[int, int, str, int], Awaitable[int]]
 """分数改变拦截器：接收 (群号, 成员 QQ 号, 显示名, 待生效的变化量)，
 返回实际生效的变化量（返回 0 表示本次改变被抵消、分数不变）。"""
 
@@ -117,10 +119,10 @@ class DuelScoreInterceptService(Protocol):
     def add_interceptor(self, interceptor: ScoreInterceptor) -> None:
         """注册分数改变拦截器（同一拦截器重复注册会被忽略）。
 
-        拦截器在分数写入前的同步段内按注册顺序依次调用：每个拦截器
-        接收上一个拦截器改写后的变化量，返回自己改写后的结果（返回
-        0 表示本次改变被抵消、分数不变）；全部决斗分数写入（决斗
-        结算、道具效果等）都会经过该拦截点。拦截器应保持快捷；单个
+        拦截器在分数写入前按注册顺序依次等待：每个拦截器接收上一个
+        拦截器改写后的变化量，返回自己改写后的结果（返回 0 表示本次
+        改变被抵消、分数不变）；全部决斗分数写入（决斗结算、道具效果
+        等）都会经过该拦截点。拦截器为异步回调，应保持快捷；单个
         拦截器抛出的异常只记录错误日志、本次改写不生效，不影响分数
         写入与其它拦截器。
 
@@ -166,7 +168,7 @@ class DuelSnapshot:
 class DuelStateService(Protocol):
     """决斗状态查询服务（由猜拳决斗插件提供）。"""
 
-    def list_duels(self, group_id: int) -> list[DuelSnapshot]:
+    async def list_duels(self, group_id: int) -> list[DuelSnapshot]:
         """返回指定群内全部进行中决斗的快照（按创建顺序）。"""
         ...
 
@@ -334,7 +336,7 @@ class DuelSettleService(Protocol):
         ...
 
 
-DuelGestureQuotaProvider = Callable[[int, int, int], int]
+DuelGestureQuotaProvider = Callable[[int, int, int], Awaitable[int]]
 """决斗手势配额提供者：接收 (群号, 成员 QQ 号, 对手 QQ 号)，返回该成员
 在该场决斗中需要发送的猜拳表情数量（正整数）。"""
 
@@ -381,11 +383,16 @@ class DuelGesturePairVerdict:
     依据时由决斗插件采用；None 表示无说明。"""
 
 
-DuelGesturePairRule = Callable[[DuelGesturePairContext], DuelGesturePairVerdict | None]
+DuelGesturePairRule = Callable[
+    [DuelGesturePairContext], Awaitable[DuelGesturePairVerdict | None]
+]
 """单组手势判定规则：返回 None 表示本规则不裁决该组手势（交基础规则或
-其它规则）。规则须为纯函数、不产生副作用并保持快捷。"""
+其它规则）。规则为异步函数，可读取持久化状态；须保持快捷、只读不写
+并避免发送消息。"""
 
-DuelGesturePairOutcome = Callable[[int, int, int, int], DuelGesturePairVerdict]
+DuelGesturePairOutcome = Callable[
+    [int, int, int, int], Awaitable[DuelGesturePairVerdict]
+]
 """按已注册规则判定一组手势：接收 (判定主体 QQ, 其手势, 对手 QQ, 其手势)，
 返回判定结果。"""
 
@@ -433,9 +440,9 @@ class DuelGestureVerdict:
     """结算消息前缀说明（如道具效果），None 表示无。"""
 
 
-DuelGestureJudge = Callable[[DuelGestureContext], DuelGestureVerdict | None]
+DuelGestureJudge = Callable[[DuelGestureContext], Awaitable[DuelGestureVerdict | None]]
 """整局判定规则（手势效果）：返回 None 表示本效果不裁决本场胜负。
-规则须为纯函数、不产生副作用并保持快捷。"""
+规则为异步函数，可读取持久化状态；须保持快捷、只读不写并避免发送消息。"""
 
 
 @runtime_checkable
@@ -626,13 +633,13 @@ class DuelCancelService(Protocol):
 class SignScoreBonusService(Protocol):
     """签到分数加成服务（由道具插件提供）。"""
 
-    def extra_score(self, group_id: int, user_id: int) -> int:
+    async def extra_score(self, group_id: int, user_id: int) -> int:
         """返回成员本次签到额外获得的决斗分数（无加成时返回 0）。
 
-        由签到插件在发放签到奖励的同步段内调用，返回值与签到基础
-        分数相加后计入本次签到获得的决斗分数；因此实现应按签到
-        时刻的成员状态即时计算（如道具状态层数），不做任何落盘或
-        消息发送，并保持快捷。
+        由签到插件在发放签到奖励的同一流程内调用（不得落盘或发送
+        消息），返回值与签到基础分数相加后计入本次签到获得的决斗
+        分数；因此实现应按签到时刻的成员状态即时计算（如道具状态
+        层数），并保持快捷。
 
         参数:
             group_id: 群号。
@@ -656,7 +663,7 @@ class GrantedItem:
 class ItemService(Protocol):
     """道具发放服务（由道具插件提供）。"""
 
-    def grant_random(
+    async def grant_random(
         self, group_id: int, user_id: int, name: str
     ) -> GrantedItem | None:
         """为成员随机发放并登记一件道具，返回发放结果；抽取失败时返回 None。

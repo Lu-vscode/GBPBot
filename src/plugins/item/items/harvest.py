@@ -19,9 +19,9 @@ from src.plugins.item._framework import (
 
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：所有决斗分数非零的群成员决斗分数 +1。"""
-    entries = get_rank_entries(context.group_id)
+    entries = await get_rank_entries(context.group_id)
     if entries:
-        add_user_scores(
+        await add_user_scores(
             context.group_id,
             [(user_id, user_name, 1) for user_id, user_name, _ in entries],
         )

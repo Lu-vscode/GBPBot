@@ -3,14 +3,17 @@
 进行中的决斗保存在内存中（duels 列表，按创建顺序排列）；本模块实现
 对外的决斗状态查询服务（DuelStateService，实例 state_service 由插件
 主模块统一注册），其它插件经服务注册中心查看某个群内进行中决斗的
-只读快照。状态变更函数（记录/认领手势、移除决斗）供包内其它模块在
-同步段（无 await）调用，用于防并发事件重复记录、重复结算。
+只读快照。状态变更函数（记录/认领手势、移除决斗）供包内其它模块
+调用：所需手势数量需读取数据库，记录手势的“检查—修改”在模块级
+锁内完成，用于防并发事件重复记录；移除决斗按对象身份判断，
+不受锁影响（重复结算已被身份检查挡住）。
 
 决斗中成员所需的猜拳表情数量默认为 1，可由整局判定效果（如道具的
 “强运”效果）提高：效果经决斗手势服务（DuelGestureService）注册判定与
 所需数量，所需数量在记录手势与就绪判定时动态计算（见 _judgement）。
 """
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -66,25 +69,32 @@ class Duel:
 # 进行中的决斗，按创建顺序排列（同一成员多场决斗时优先满足旧的）
 duels: list[Duel] = []
 
+# 记录手势时的互斥锁：结合“读取手势配额（需 await 数据库）再追加手势”
+# 的检查—修改过程，避免并发事件记录到超出配额的数量
+_state_lock = asyncio.Lock()
+
 
 def _opponent_of(duel: Duel, user_id: int) -> int:
     """返回决斗中相对于指定成员的另一方 QQ 号（调用方保证其在决斗中）。"""
     return duel.opponent_id if user_id == duel.challenger_id else duel.challenger_id
 
 
-def completed_gestures(duel: Duel, user_id: int) -> bool:
+async def completed_gestures(duel: Duel, user_id: int) -> bool:
     """判断成员是否已完成出手（已发送全部所需的猜拳表情）。
 
     所需数量按当前动态配额计算（见 required_gestures）。
     """
-    return len(duel.gestures.get(user_id, [])) >= required_gestures(
-        duel.group_id, user_id, _opponent_of(duel, user_id)
-    )
+    quota = await required_gestures(duel.group_id, user_id, _opponent_of(duel, user_id))
+    return len(duel.gestures.get(user_id, [])) >= quota
 
 
-def snapshot(duel: Duel) -> DuelSnapshot:
+async def snapshot(duel: Duel) -> DuelSnapshot:
     """构造一场决斗的只读快照。"""
     now = time.monotonic()
+    completed: set[int] = set()
+    for user_id in (duel.challenger_id, duel.opponent_id):
+        if await completed_gestures(duel, user_id):
+            completed.add(user_id)
     return DuelSnapshot(
         group_id=duel.group_id,
         challenger_id=duel.challenger_id,
@@ -93,11 +103,7 @@ def snapshot(duel: Duel) -> DuelSnapshot:
         opponent_name=duel.opponent_name,
         multiplier=duel.multiplier,
         accepted=duel.accepted,
-        gesture_users=frozenset(
-            user_id
-            for user_id in (duel.challenger_id, duel.opponent_id)
-            if completed_gestures(duel, user_id)
-        ),
+        gesture_users=frozenset(completed),
         remaining_seconds=max(0.0, duel.created_at + DURATION_SECONDS - now),
     )
 
@@ -105,9 +111,9 @@ def snapshot(duel: Duel) -> DuelSnapshot:
 class _DuelStateService(DuelStateService):
     """决斗状态查询服务的实现：其它插件经服务注册中心查看进行中决斗。"""
 
-    def list_duels(self, group_id: int) -> list[DuelSnapshot]:
+    async def list_duels(self, group_id: int) -> list[DuelSnapshot]:
         """返回指定群内全部进行中决斗的只读快照（按创建顺序）。"""
-        return [snapshot(duel) for duel in duels if duel.group_id == group_id]
+        return [await snapshot(duel) for duel in duels if duel.group_id == group_id]
 
 
 # 状态服务实例（由插件主模块统一注册）
@@ -150,45 +156,47 @@ def find_provoked_duel(group_id: int, challenger: int, opponent: int) -> Duel | 
     return None
 
 
-def take_gesture(group_id: int, user_id: int, gesture: int) -> Duel | None:
+async def take_gesture(group_id: int, user_id: int, gesture: int) -> Duel | None:
     """把手势记录到等待该成员出手的最旧一场决斗，返回该决斗。
 
-    需在同步段（无 await）中调用，用于防并发事件重复记录。成员已
-    发送完全部所需猜拳表情时跳过该决斗（见 completed_gestures）。
+    记录在模块级锁内完成，避免并发事件重复记录。成员已发送完全部
+    所需猜拳表情时跳过该决斗（见 completed_gestures）。
     """
-    for duel in duels:
-        if (
-            duel.group_id == group_id
-            and duel.accepted
-            and user_id in (duel.challenger_id, duel.opponent_id)
-            and not completed_gestures(duel, user_id)
-        ):
-            if duel.provoked_by_bot and user_id == duel.opponent_id:
-                # 被挑衅决斗中对方的手势由机器人代替，对方发送的猜拳表情无效
-                continue
-            if duel.bot_rps_active and user_id == duel.opponent_id:
-                # 机器人代发期间：该消息由代发流程回查结果后统一记录，
-                # 消息事件不重复记录（见 _flow.send_bot_rps）
-                continue
-            duel.gestures.setdefault(user_id, []).append(gesture)
-            return duel
+    async with _state_lock:
+        for duel in duels:
+            if (
+                duel.group_id == group_id
+                and duel.accepted
+                and user_id in (duel.challenger_id, duel.opponent_id)
+                and not await completed_gestures(duel, user_id)
+            ):
+                if duel.provoked_by_bot and user_id == duel.opponent_id:
+                    # 被挑衅决斗中对方的手势由机器人代替，对方发送的猜拳表情无效
+                    continue
+                if duel.bot_rps_active and user_id == duel.opponent_id:
+                    # 机器人代发期间：该消息由代发流程回查结果后统一记录，
+                    # 消息事件不重复记录（见 _flow.send_bot_rps）
+                    continue
+                duel.gestures.setdefault(user_id, []).append(gesture)
+                return duel
     return None
 
 
-def record_gesture(duel: Duel, user_id: int, gesture: int) -> bool:
-    """记录指定决斗中成员的手势（同步段），返回是否记录成功。
+async def record_gesture(duel: Duel, user_id: int, gesture: int) -> bool:
+    """记录指定决斗中成员的手势（在模块级锁内），返回是否记录成功。
 
     决斗已被移除（判定完成或超时）或成员已发送完全部所需猜拳表情时
     返回 False（见 completed_gestures）。
     """
-    if not any(item is duel for item in duels):
-        return False
-    if user_id not in (duel.challenger_id, duel.opponent_id):
-        return False
-    if completed_gestures(duel, user_id):
-        return False
-    duel.gestures.setdefault(user_id, []).append(gesture)
-    return True
+    async with _state_lock:
+        if not any(item is duel for item in duels):
+            return False
+        if user_id not in (duel.challenger_id, duel.opponent_id):
+            return False
+        if await completed_gestures(duel, user_id):
+            return False
+        duel.gestures.setdefault(user_id, []).append(gesture)
+        return True
 
 
 def remove_duel(duel: Duel) -> bool:
@@ -200,8 +208,8 @@ def remove_duel(duel: Duel) -> bool:
     return False
 
 
-def duel_ready(duel: Duel) -> bool:
+async def duel_ready(duel: Duel) -> bool:
     """判断决斗双方是否都已发送完全部所需的猜拳表情。"""
-    return completed_gestures(duel, duel.challenger_id) and completed_gestures(
-        duel, duel.opponent_id
-    )
+    return await completed_gestures(
+        duel, duel.challenger_id
+    ) and await completed_gestures(duel, duel.opponent_id)

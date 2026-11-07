@@ -33,28 +33,28 @@ _SHIELD_NAME = "玉璋护盾"
 _DURATION_SECONDS = 3600.0
 
 
-def _active_states(group_id: int, user_id: int) -> list[ItemState]:
+async def _active_states(group_id: int, user_id: int) -> list[ItemState]:
     """返回成员持有的全部有效「玉璋护盾」状态（按到期时间升序）。
 
     expires_at 为 None（异常数据）的条目排在最前，优先被消耗。
     """
     states = [
         state
-        for state in list_states(group_id, user_id)
+        for state in await list_states(group_id, user_id)
         if state.key.startswith(_STATE_KEY_PREFIX)
     ]
     states.sort(key=lambda state: state.expires_at or 0.0)
     return states
 
 
-def _next_state_key(group_id: int, user_id: int) -> str:
+async def _next_state_key(group_id: int, user_id: int) -> str:
     """为新的一层护盾生成状态键（在现存有效状态的序号中取最小可用值）。
 
     已过期但未清理的状态可能占用同序号键；add_state 添加同键状态时
     会覆盖旧条目，序号仍可复用。
     """
     used: set[int] = set()
-    for state in _active_states(group_id, user_id):
+    for state in await _active_states(group_id, user_id):
         suffix = state.key[len(_STATE_KEY_PREFIX) :]
         if suffix.isdigit():
             used.add(int(suffix))
@@ -66,16 +66,16 @@ def _next_state_key(group_id: int, user_id: int) -> str:
 
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：登记一层持续 1 小时的「玉璋护盾」并发送提示。"""
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(
-            key=_next_state_key(context.group_id, context.user_id),
+            key=await _next_state_key(context.group_id, context.user_id),
             item_id=_ITEM_ID,
         ),
         duration_seconds=_DURATION_SECONDS,
     )
-    layers = len(_active_states(context.group_id, context.user_id))
+    layers = len(await _active_states(context.group_id, context.user_id))
     await context.send(
         f"{context.user_name} 使用了 {context.item.label}，"
         f"获得了一层“{_SHIELD_NAME}”。\n\n"
@@ -91,10 +91,10 @@ async def _intercept_curse(context: ItemUseContext) -> bool:
     最早到期的一层、发送抵消提示并返回 True；未持有护盾时返回 False，
     诅咒按正常流程自动使用。
     """
-    states = _active_states(context.group_id, context.user_id)
+    states = await _active_states(context.group_id, context.user_id)
     if not states:
         return False
-    remove_state(context.group_id, context.user_id, states[0].key)
+    await remove_state(context.group_id, context.user_id, states[0].key)
     remaining = len(states) - 1
     logger.info(
         f"群 {context.group_id} 成员 {context.user_id} 的"

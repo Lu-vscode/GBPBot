@@ -73,9 +73,9 @@ async def _handle_use(context: ItemUseContext) -> None:
     已有“储蓄”状态时只刷新持续时间，储蓄分数保持不变（状态过期后
     由定时清理静默丢弃，此时重新使用等同于首次使用）。
     """
-    existing = get_state(context.group_id, context.user_id, _STATE_KEY)
+    existing = await get_state(context.group_id, context.user_id, _STATE_KEY)
     savings = _savings_of(existing)
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(key=_STATE_KEY, item_id=_ITEM_ID, data={_SCORE_KEY: savings}),
@@ -94,14 +94,20 @@ async def _handle_use(context: ItemUseContext) -> None:
     )
 
 
-def _add_savings(group_id: int, user_id: int, state: ItemState, amount: int) -> int:
+async def _add_savings(
+    group_id: int, user_id: int, state: ItemState, amount: int
+) -> int:
     """把本场决斗的点数存入储蓄分数并落盘（不刷新状态时长），返回新储蓄分数。"""
     savings = _savings_of(state) + amount
-    set_state_data(group_id, user_id, _STATE_KEY, {**state.data, _SCORE_KEY: savings})
+    await set_state_data(
+        group_id, user_id, _STATE_KEY, {**state.data, _SCORE_KEY: savings}
+    )
     return savings
 
 
-def _apply_score_change(group_id: int, user_id: int, name: str, delta: int) -> int:
+async def _apply_score_change(
+    group_id: int, user_id: int, name: str, delta: int
+) -> int:
     """为成员增减决斗分数，返回实际生效的变化量。
 
     变化量经分数改变拦截器链处理（如「无懈可击」可将其抵消为 0），
@@ -109,8 +115,8 @@ def _apply_score_change(group_id: int, user_id: int, name: str, delta: int) -> i
     """
     if delta == 0:
         return 0
-    before = get_user_score(group_id, user_id)
-    after = add_user_score(group_id, user_id, name, delta)
+    before = await get_user_score(group_id, user_id)
+    after = await add_user_score(group_id, user_id, name, delta)
     return (after - before) if delta > 0 else (before - after)
 
 
@@ -131,11 +137,13 @@ async def _settle_winner(event: DuelEvent) -> None:
     if event.winner_id is None:
         # 不可达：非平局事件的胜负双方均由决斗流程填好
         return
-    state = get_state(event.group_id, event.winner_id, _STATE_KEY)
+    state = await get_state(event.group_id, event.winner_id, _STATE_KEY)
     if state is None:
         return
     name = event.winner_name or f"QQ {event.winner_id}"
-    savings = _add_savings(event.group_id, event.winner_id, state, event.multiplier)
+    savings = await _add_savings(
+        event.group_id, event.winner_id, state, event.multiplier
+    )
     await _send_duel_text(
         event,
         f"{name} 决斗获胜，往储蓄罐里存了 {event.multiplier}，储蓄分数为 {savings}。",
@@ -147,14 +155,14 @@ async def _settle_loser(event: DuelEvent) -> None:
     if event.loser_id is None:
         # 不可达：非平局事件的胜负双方均由决斗流程填好
         return
-    state = get_state(event.group_id, event.loser_id, _STATE_KEY)
+    state = await get_state(event.group_id, event.loser_id, _STATE_KEY)
     if state is None:
         return
     name = event.loser_name or f"QQ {event.loser_id}"
     savings = _savings_of(state)
     # 同步段：扣除分数并失去状态，再发送结算消息
-    deducted = _apply_score_change(event.group_id, event.loser_id, name, -savings)
-    remove_state(event.group_id, event.loser_id, _STATE_KEY)
+    deducted = await _apply_score_change(event.group_id, event.loser_id, name, -savings)
+    await remove_state(event.group_id, event.loser_id, _STATE_KEY)
     if deducted:
         detail = f"决斗分数 -{deducted}"
     elif savings:
@@ -190,15 +198,15 @@ async def handle_item_draw(bot: Bot, event: GroupMessageEvent) -> None:
 
     仅限持有“储蓄”状态的成员使用，其它成员使用时静默失败。
     """
-    state = get_state(event.group_id, event.user_id, _STATE_KEY)
+    state = await get_state(event.group_id, event.user_id, _STATE_KEY)
     if state is None:
         # 不具有“储蓄”状态：静默失败
         return
     name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
     savings = _savings_of(state)
     # 同步段：结算分数并移除状态
-    gained = _apply_score_change(event.group_id, event.user_id, name, savings)
-    remove_state(event.group_id, event.user_id, _STATE_KEY)
+    gained = await _apply_score_change(event.group_id, event.user_id, name, savings)
+    await remove_state(event.group_id, event.user_id, _STATE_KEY)
     if gained:
         detail = f"决斗分数 +{gained}"
     elif savings:

@@ -74,12 +74,12 @@ def base_outcome(actor_gesture: int, opponent_gesture: int) -> int:
     return -1
 
 
-def pair_verdict(context: DuelGesturePairContext) -> DuelGesturePairVerdict:
+async def pair_verdict(context: DuelGesturePairContext) -> DuelGesturePairVerdict:
     """按已注册的单组判定规则判定一组手势（全部放弃时用基础规则）。"""
     verdicts: list[tuple[int, str, DuelGesturePairVerdict]] = []
     for priority, name, rule in sorted(_pair_rules, key=lambda entry: -entry[0]):
         try:
-            verdict = rule(context)
+            verdict = await rule(context)
         except _RULE_ERRORS as exc:
             logger.error(f"单组手势判定规则执行出错（{name}）：{exc!r}")
             continue
@@ -99,7 +99,7 @@ def pair_verdict(context: DuelGesturePairContext) -> DuelGesturePairVerdict:
     return verdicts[0][2]
 
 
-def required_gestures(group_id: int, user_id: int, opponent_id: int) -> int:
+async def required_gestures(group_id: int, user_id: int, opponent_id: int) -> int:
     """返回成员在该场决斗中需要发送的猜拳表情数量（至少 1）。
 
     默认需要 1 个，注册整局判定效果后按其 required 提供者返回的数量提高
@@ -111,7 +111,7 @@ def required_gestures(group_id: int, user_id: int, opponent_id: int) -> int:
         if provider is None:
             continue
         try:
-            value = provider(group_id, user_id, opponent_id)
+            value = await provider(group_id, user_id, opponent_id)
         except _RULE_ERRORS as exc:
             logger.error(f"手势配额提供者执行出错（{name}）：{exc!r}")
             continue
@@ -130,10 +130,10 @@ def _make_pair_outcome(
     """构造整局判定上下文使用的单组判定函数（按参与者 QQ 号取显示名）。"""
     names = {challenger.user_id: challenger.name, opponent.user_id: opponent.name}
 
-    def resolve(
+    async def resolve(
         actor_id: int, actor_gesture: int, opponent_id: int, opponent_gesture: int
     ) -> DuelGesturePairVerdict:
-        return pair_verdict(
+        return await pair_verdict(
             DuelGesturePairContext(
                 group_id=group_id,
                 actor_id=actor_id,
@@ -149,7 +149,7 @@ def _make_pair_outcome(
     return resolve
 
 
-def _aggregate(
+async def _aggregate(
     context: DuelGestureContext, multi: DuelGestureSide, single: DuelGestureSide
 ) -> int:
     """把多手势方逐手势对对方首手势的判定聚合为整局结果。
@@ -158,8 +158,10 @@ def _aggregate(
     返回 1 多手势方胜、0 平局、-1 多手势方负。
     """
     outcomes = [
-        context.pair_outcome(
-            multi.user_id, gesture, single.user_id, single.gestures[0]
+        (
+            await context.pair_outcome(
+                multi.user_id, gesture, single.user_id, single.gestures[0]
+            )
         ).outcome
         for gesture in multi.gestures
     ]
@@ -170,7 +172,7 @@ def _aggregate(
     return -1
 
 
-def _default_verdict(context: DuelGestureContext) -> DuelGestureVerdict:
+async def _default_verdict(context: DuelGestureContext) -> DuelGestureVerdict:
     """没有整局判定效果裁决时的默认判定。
 
     双方各一个手势时按单组判定（含单组规则与基础规则）；任一方需要多个
@@ -186,7 +188,7 @@ def _default_verdict(context: DuelGestureContext) -> DuelGestureVerdict:
         )
         return DuelGestureVerdict(winner_id=None)
     if len(challenger.gestures) == 1 and len(opponent.gestures) == 1:
-        verdict = context.pair_outcome(
+        verdict = await context.pair_outcome(
             challenger.user_id,
             challenger.gestures[0],
             opponent.user_id,
@@ -204,7 +206,7 @@ def _default_verdict(context: DuelGestureContext) -> DuelGestureVerdict:
         f"群 {context.group_id} 的决斗需要多个手势但没有整局判定效果裁决"
         f"（成员 {multi.user_id}），已按逐手势聚合兜底判定"
     )
-    outcome = _aggregate(context, multi, single)
+    outcome = await _aggregate(context, multi, single)
     if outcome == 0:
         return DuelGestureVerdict(winner_id=None)
     return DuelGestureVerdict(
@@ -212,7 +214,7 @@ def _default_verdict(context: DuelGestureContext) -> DuelGestureVerdict:
     )
 
 
-def judge(
+async def judge(
     group_id: int, challenger: DuelGestureSide, opponent: DuelGestureSide
 ) -> DuelGestureVerdict:
     """判定一场决斗的最终胜负：先询问整局判定效果，全部放弃时按默认判定。
@@ -231,14 +233,14 @@ def judge(
         _effects, key=lambda entry: -entry[0]
     ):
         try:
-            verdict = effect_judge(context)
+            verdict = await effect_judge(context)
         except _RULE_ERRORS as exc:
             logger.error(f"整局判定效果执行出错（{name}）：{exc!r}")
             continue
         if verdict is not None:
             verdicts.append((priority, name, verdict))
     if not verdicts:
-        return _default_verdict(context)
+        return await _default_verdict(context)
     if len({verdict.winner_id for _, _, verdict in verdicts}) > 1:
         summary = "、".join(
             f"{name}={verdict.winner_id}" for _, name, verdict in verdicts

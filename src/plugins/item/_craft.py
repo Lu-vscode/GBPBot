@@ -81,7 +81,7 @@ def draw_craft_results(quality: Quality) -> tuple[str, list[ItemDefinition]] | N
     return _draw_one(GREAT_SUCCESS_PREFIX, shift_quality(quality, 2))
 
 
-def craft_error(
+async def craft_error(
     group_id: int, user_id: int, first: ItemDefinition, second: ItemDefinition
 ) -> str | None:
     """校验两件合成材料（品质相同、非金色、数量足够且可交易），
@@ -98,18 +98,11 @@ def craft_error(
     else:
         need_text = f"{first.label}、{second.label} 各一件"
     if (
-        get_item_count(group_id, user_id, first.item_id) < needed
-        or get_item_count(group_id, user_id, second.item_id) < needed
+        await get_item_count(group_id, user_id, first.item_id) < needed
+        or await get_item_count(group_id, user_id, second.item_id) < needed
     ):
         return f"合成需要 {need_text}，你的数量不足。"
-    unavailable = next(
-        (
-            definition
-            for definition in (first, second)
-            if transferable_count(group_id, user_id, definition.item_id) < needed
-        ),
-        None,
-    )
-    if unavailable is not None:
-        return f"合成需要 {need_text}，但 {unavailable.label} 目前无法用于合成。"
+    for definition in (first, second):
+        if await transferable_count(group_id, user_id, definition.item_id) < needed:
+            return f"合成需要 {need_text}，但 {definition.label} 目前无法用于合成。"
     return None

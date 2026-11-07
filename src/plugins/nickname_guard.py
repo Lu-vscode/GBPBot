@@ -8,7 +8,7 @@ NICKNAME_GUARD_DISABLED_GROUPS、NICKNAME_GUARD_CHECK_INTERVAL
 环境变量可配置不启用本功能的群号列表与定时检查间隔。
 """
 
-from typing import Any, Literal
+from typing import Any
 
 from nonebot import (
     get_bots,
@@ -44,7 +44,9 @@ class GroupCardNoticeEvent(NoticeEvent):
     事件模型中未内置该事件，需在此自定义并注册后才会被解析为该类型。
     """
 
-    notice_type: Literal["group_card"]
+    # 事件类型固定为 "group_card"；适配器把该字段声明为 str，收窄为字面量
+    # 会违反可变字段的协变限制（pyright 报错），故保持基类的 str
+    notice_type: str
     user_id: int
     group_id: int
     card_new: str

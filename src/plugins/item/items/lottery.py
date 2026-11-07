@@ -61,17 +61,17 @@ async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：按概率获得或失去固定决斗分数。"""
     win_chance = _WIN_CHANCES[context.item.item_id]
     if random.random() < win_chance:
-        context.add_score(_SCORE_DELTA)
+        await context.add_score(_SCORE_DELTA)
         await context.send(f"你使用了 {context.item.label}，决斗分数+{_SCORE_DELTA}。")
         return
-    context.add_score(-_SCORE_DELTA)
+    await context.add_score(-_SCORE_DELTA)
     await context.send(f"你使用了 {context.item.label}，决斗分数-{_SCORE_DELTA}。")
 
 
 async def _handle_curse_use(context: ItemUseContext) -> None:
     """使用效果：按概率失去固定决斗分数，未命中时无副作用。"""
     if random.random() < _CURSE_LOSE_CHANCE:
-        context.add_score(-_SCORE_DELTA)
+        await context.add_score(-_SCORE_DELTA)
         await context.send(f"黑色诅咒生效，祝你好运，你的决斗分数-{_SCORE_DELTA}。")
         return
     await context.send("黑色诅咒生效，幸运儿没有奖励，你的决斗分数没有变化。")

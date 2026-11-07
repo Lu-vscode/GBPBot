@@ -21,7 +21,7 @@ from src.plugins.duel._config import text
 from src.plugins.duel._events import fire_duel_event, make_duel_event, run_settlers
 from src.plugins.duel._judgement import judge
 from src.plugins.duel._messages import fetch_rps_result, send_rps, send_text
-from src.plugins.duel._scores import update_score
+from src.plugins.duel._scores import update_scores
 from src.plugins.duel._state import (
     Duel,
     completed_gestures,
@@ -71,7 +71,7 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
     """
     challenger_gestures = tuple(duel.gestures[duel.challenger_id])
     opponent_gestures = tuple(duel.gestures[duel.opponent_id])
-    verdict = judge(
+    verdict = await judge(
         duel.group_id,
         DuelGestureSide(
             user_id=duel.challenger_id,
@@ -157,8 +157,14 @@ async def resolve_duel(bot: Bot, duel: Duel) -> None:
         )
     else:
         winner_id, winner_name, loser_id, loser_name = final
-        update_score(duel.group_id, winner_id, winner_name, multiplier)
-        update_score(duel.group_id, loser_id, loser_name, -multiplier)
+        # 双方胜负在一次事务内写入，避免“赢家加分成功、输家扣分失败”的中间态
+        await update_scores(
+            duel.group_id,
+            [
+                (winner_id, winner_name, multiplier),
+                (loser_id, loser_name, -multiplier),
+            ],
+        )
         logger.info(
             f"群 {duel.group_id} 的决斗中 {winner_id}（{winner_name}）获胜，"
             f"{loser_id}（{loser_name}）落败"
@@ -202,7 +208,7 @@ async def send_bot_rps(bot: Bot, duel: Duel) -> None:
     """
     duel.bot_rps_active = True
     try:
-        while not completed_gestures(duel, duel.opponent_id):
+        while not await completed_gestures(duel, duel.opponent_id):
             if not any(item is duel for item in duels):
                 # 决斗已被移除（取消或超时），停止发送
                 return
@@ -217,7 +223,7 @@ async def send_bot_rps(bot: Bot, duel: Duel) -> None:
                 return
             # 记录手势（同步段，避免并发事件重复记录），随后发布事件；
             # 记录失败（决斗已被移除）时停止发送
-            if not record_gesture(duel, duel.opponent_id, gesture):
+            if not await record_gesture(duel, duel.opponent_id, gesture):
                 return
             await fire_duel_event(
                 make_duel_event(
@@ -229,7 +235,7 @@ async def send_bot_rps(bot: Bot, duel: Duel) -> None:
             )
     finally:
         duel.bot_rps_active = False
-    if not duel_ready(duel):
+    if not await duel_ready(duel):
         return
     if not remove_duel(duel):
         return

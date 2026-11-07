@@ -13,6 +13,7 @@ dependencies = [
     "nonebot-plugin-sentry>=2.0.0",
     "nonebot-plugin-apscheduler>=0.5.0",
     "nonebot-plugin-localstore>=0.7.4",
+    "nonebot-plugin-orm[sqlite]>=0.8.4",
     "python-dotenv>=0.21.0,<2.0.0",
 ]
 
@@ -39,6 +40,7 @@ nonebot-plugin-docs = ["nonebot_plugin_docs"]
 nonebot-plugin-sentry = ["nonebot_plugin_sentry"]
 nonebot-plugin-apscheduler = ["nonebot_plugin_apscheduler"]
 nonebot-plugin-localstore = ["nonebot_plugin_localstore"]
+nonebot-plugin-orm = ["nonebot_plugin_orm"]
 [tool.ruff]
 line-length = 88
 target-version = "py312"
@@ -109,6 +111,9 @@ allowed-confusables = ["，", "。", "“", "”", "：", "；", "？", "！", "
 "legacy/stress/_stress_test.py" = ["ASYNC109"]
 # 数据编辑 CLI 以 print 向终端输出面向操作者的信息
 "scripts/data/edit/*.py" = ["T20"]
+# 迁移脚本同样面向操作者输出
+"scripts/data/migrate_orm.py" = ["T20"]
+"scripts/data/orm.py" = ["T20"]
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true

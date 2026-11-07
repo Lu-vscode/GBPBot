@@ -600,7 +600,7 @@ async def handle_duel_rank(
         sections.append(
             _rank_section(
                 RANK_TITLE_HIGH,
-                rank_entries(event.group_id, positive=True),
+                await rank_entries(event.group_id, positive=True),
                 high_limit,
             )
         )
@@ -608,7 +608,7 @@ async def handle_duel_rank(
         sections.append(
             _rank_section(
                 RANK_TITLE_LOW,
-                rank_entries(event.group_id, positive=False),
+                await rank_entries(event.group_id, positive=False),
                 low_limit,
             )
         )
@@ -647,7 +647,7 @@ async def handle_duel_score(
                 bot, event.group_id, SCORE_SUM_DENIED, reply_to=event.message_id
             )
             return
-        total = total_score(event.group_id)
+        total = await total_score(event.group_id)
         await send_text(
             bot,
             event.group_id,
@@ -655,7 +655,7 @@ async def handle_duel_score(
             reply_to=event.message_id,
         )
         return
-    score = score_service.get_score(event.group_id, event.user_id)
+    score = await score_service.get_score(event.group_id, event.user_id)
     name = _sender_display_name(event)
     await send_text(
         bot,
@@ -702,7 +702,7 @@ def _gesture_state_text(*, sent: int, quota: int, by_bot: bool) -> str:
     return "你已出拳，等待对方发送猜拳表情"
 
 
-def _status_lines(group_id: int, user_id: int) -> list[str]:
+async def _status_lines(group_id: int, user_id: int) -> list[str]:
     """生成成员在本群进行中决斗的状态描述行（按创建顺序）。"""
     now = time.monotonic()
     lines: list[str] = []
@@ -735,7 +735,7 @@ def _status_lines(group_id: int, user_id: int) -> list[str]:
         )
         state = _gesture_state_text(
             sent=len(duel.gestures.get(user_id, [])),
-            quota=required_gestures(group_id, user_id, other_id),
+            quota=await required_gestures(group_id, user_id, other_id),
             by_bot=duel.provoked_by_bot and user_id == duel.opponent_id,
         )
         lines.append(
@@ -744,7 +744,7 @@ def _status_lines(group_id: int, user_id: int) -> list[str]:
     return lines
 
 
-def _all_status_lines(group_id: int) -> list[str]:
+async def _all_status_lines(group_id: int) -> list[str]:
     """生成本群全部进行中决斗的状态描述行（按创建顺序）。"""
     now = time.monotonic()
     lines: list[str] = []
@@ -758,7 +758,9 @@ def _all_status_lines(group_id: int) -> list[str]:
                 f"（×{duel.multiplier}）：等待对方接受，{suffix}。"
             )
             continue
-        if duel.provoked_by_bot and not completed_gestures(duel, duel.opponent_id):
+        if duel.provoked_by_bot and not await completed_gestures(
+            duel, duel.opponent_id
+        ):
             # 被挑衅一方的手势由机器人代替（代替发送前仅短暂经过）
             state = f"等待 Bot 代替 {duel.opponent_name} 发送猜拳表情"
         else:
@@ -769,7 +771,7 @@ def _all_status_lines(group_id: int) -> list[str]:
             pending = [
                 (uid, name)
                 for uid, name in players
-                if not completed_gestures(duel, uid)
+                if not await completed_gestures(duel, uid)
             ]
             if len(pending) == 1:
                 pending_id, pending_name = pending[0]
@@ -779,7 +781,7 @@ def _all_status_lines(group_id: int) -> list[str]:
                     else duel.challenger_id
                 )
                 sent = len(duel.gestures.get(pending_id, []))
-                quota = required_gestures(group_id, pending_id, other_id)
+                quota = await required_gestures(group_id, pending_id, other_id)
                 progress = f"（已发送 {sent}/{quota}）" if quota > 1 else ""
                 state = f"等待 {pending_name} 发送猜拳表情{progress}"
             else:
@@ -819,11 +821,11 @@ async def handle_duel_status(
                 bot, event.group_id, STATUS_ALL_DENIED, reply_to=event.message_id
             )
             return
-        lines = _all_status_lines(event.group_id)
+        lines = await _all_status_lines(event.group_id)
         empty_text = "本群没有进行中的决斗。"
         header = f"本群有 {len(lines)} 场进行中的决斗："
     else:
-        lines = _status_lines(event.group_id, event.user_id)
+        lines = await _status_lines(event.group_id, event.user_id)
         empty_text = "你在本群没有进行中的决斗。"
         header = f"你在本群有 {len(lines)} 场进行中的决斗："
     if not lines:
@@ -846,7 +848,7 @@ async def handle_duel_gesture(bot: Bot, event: GroupMessageEvent) -> None:
         return
     # 同步段：记录手势（避免并发事件重复记录），随后发布事件、
     # 检查就绪并认领结算（认领有对象身份保护，不会重复结算）
-    duel = take_gesture(event.group_id, event.user_id, gesture)
+    duel = await take_gesture(event.group_id, event.user_id, gesture)
     if duel is None:
         return
     logger.debug(
@@ -857,7 +859,7 @@ async def handle_duel_gesture(bot: Bot, event: GroupMessageEvent) -> None:
             duel, DuelEventKind.GESTURE, actor_id=event.user_id, gesture=gesture
         )
     )
-    if not duel_ready(duel):
+    if not await duel_ready(duel):
         return
     if not remove_duel(duel):
         return

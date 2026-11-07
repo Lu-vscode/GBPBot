@@ -6,9 +6,9 @@
 
 检查过程：
 
-1. 按真实插件链路加载 duel 与 item 插件（item 的加载器会自动发现并导入
-   items/ 下的全部道具模块，模块在导入期完成注册）；数据目录重定向到
-   系统临时目录，不触碰工作区的 data/ 生产数据。
+1. 按真实插件链路加载 nonebot-plugin-orm 与 duel、item 插件（item 的加载器会
+   自动发现并导入 items/ 下的全部道具模块，模块在导入期完成注册）；数据
+   目录重定向到系统临时目录，不触碰工作区的 data/ 生产数据。
 2. 逐个检查 items/ 下的道具模块：导入注册成功记 PASS；导入失败时重放
    导入并给出具体原因（编号留空、编号不是三位数字、编号重复、品质与
    类型不一致或模块代码异常等）；下划线开头的模块会被加载器跳过，记 SKIP。
@@ -87,7 +87,12 @@ def _init_nonebot() -> None:
 
 
 def _load_plugins() -> bool:
-    """按真实链路加载 duel 与 item 插件，返回是否加载成功。"""
+    """按真实链路加载 ORM、duel 与 item 插件，返回是否加载成功。"""
+    if nonebot.load_plugin("nonebot_plugin_orm") is None:
+        logger.error(
+            "nonebot-plugin-orm 加载失败（插件的模型依赖其基类），无法继续检查"
+        )
+        return False
     if nonebot.load_plugin("src.plugins.duel") is None:
         logger.error("duel 插件加载失败（item 依赖其服务），无法继续检查")
         return False

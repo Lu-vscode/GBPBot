@@ -36,7 +36,7 @@ _COPY_ITEMS = (
 )
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：参数与要复制的目标道具；返回错误文案时本次不消耗。"""
     if len(context.args) != 1 or not is_item_id(context.args[0]):
         return (
@@ -47,7 +47,7 @@ def _can_use(context: ItemUseContext) -> str | None:
     target = get_item(target_id)
     if target is None:
         return f"道具 {target_id} 不存在。"
-    if get_item_count(context.group_id, context.user_id, target_id) < 1:
+    if await get_item_count(context.group_id, context.user_id, target_id) < 1:
         return f"你未拥有道具 {target.label}。"
     if target.quality > context.item.quality:
         return (
@@ -62,7 +62,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     target = get_item(context.args[0])
     if target is None:  # 不可达：can_use 已校验目标道具存在
         return
-    add_item(context.group_id, context.user_id, target.item_id)
+    await add_item(context.group_id, context.user_id, target.item_id)
     await context.send(f"你使用了 {context.item.label}，成功复制出 {target.label}。")
 
 

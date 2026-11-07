@@ -1,85 +1,71 @@
-"""道具库存数据（data/item/inventory.json）的读取、校验与修改命令。
+"""道具库存数据（表 gbp_item_inventory）的读取、校验与修改命令。
 
-数据格式与 src/plugins/item/_storage.py 的加载/写盘规则保持一致：
-顶层为 群号字符串 -> QQ 号字符串 -> 道具编号字符串 -> 数量（正整数）。
-插件加载时会丢弃的记录（键或数量无效）在本模块列为问题并拒绝修改；
-空成员、空群等无数据价值的空容器被静默清理。插件侧数据格式变更时
-必须同步维护本模块。
+数据由道具插件写入（对应 src/plugins/item/_models.py 的 ItemInventory）：
+主键为 (群号, 成员 QQ 号, 道具编号)，数量约束 `count > 0` 由数据库强制，
+数量归零即删除条目。本模块直接读写数据库，不导入插件代码；插件侧表
+结构变更时必须同步维护本模块的表名与列名。
 """
 
 import argparse
-from pathlib import Path
+import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 from . import _pipeline
 
-FILE_REL = Path("item/inventory.json")
+TABLE = "gbp_item_inventory"
 LABEL = "道具库存数据"
 
-_UserItems = dict[str, int]
-_Group = dict[str, _UserItems]
-_Inventory = dict[str, _Group]
+# 道具编号长度（三位数字字符串，如 "044"）
+_ITEM_ID_LENGTH = 3
 
 
-def _as_count(value: Any) -> int | None:
-    """校验道具数量（正整数），无效时返回 None（与插件规则一致）。"""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value
-
-
-def normalize(raw: Any) -> tuple[_Inventory, list[str]]:
-    """校验并规范化库存数据，返回（干净数据, 问题列表）。"""
-    if not isinstance(raw, dict):
-        return {}, ["顶层结构不是 JSON 对象"]
+def validate(conn: sqlite3.Connection) -> list[str]:
+    """校验表内记录，返回问题列表（均为需要人工修正的异常数据）。"""
     issues: list[str] = []
-    clean: _Inventory = {}
-    for group_key, users in raw.items():
-        if not _pipeline.is_digits(group_key) or not isinstance(users, dict):
-            issues.append(f"群记录无效（键：{group_key!r}）")
+    rows = conn.execute(
+        f"SELECT group_id, user_id, item_id, count FROM {TABLE}"
+        " ORDER BY group_id, user_id, item_id"
+    ).fetchall()
+    for row in rows:
+        group_id, user_id = row["group_id"], row["user_id"]
+        if not isinstance(group_id, int) or not isinstance(user_id, int):
+            issues.append(f"群号/QQ 号不是整数：{group_id!r} / {user_id!r}")
             continue
-        group: _Group = {}
-        for user_key, items in users.items():
-            if not _pipeline.is_digits(user_key) or not isinstance(items, dict):
-                issues.append(f"群 {group_key} 存在无效成员记录（键：{user_key!r}）")
-                continue
-            user_items = _normalize_user_items(group_key, user_key, items, issues)
-            if user_items:
-                group[user_key] = user_items
-        if group:
-            clean[group_key] = group
-    return clean, issues
-
-
-def _normalize_user_items(
-    group_key: Any, user_key: Any, items: dict[Any, Any], issues: list[str]
-) -> _UserItems:
-    """校验单个成员的道具表；无效条目记入 issues 并跳过。"""
-    user_items: _UserItems = {}
-    for item_key, count in items.items():
-        if not isinstance(item_key, str):
+        if group_id <= 0 or user_id <= 0:
+            issues.append(f"群号/QQ 号无效：{group_id} / {user_id}")
+            continue
+        if not _is_item_id(row["item_id"]):
             issues.append(
-                f"群 {group_key} 成员 {user_key} 存在无效道具编号：{item_key!r}"
+                f"群 {group_id} 成员 {user_id} 的道具编号无效：{row['item_id']!r}"
             )
-            continue
-        count_value = _as_count(count)
-        if count_value is None:
-            issues.append(
-                f"群 {group_key} 成员 {user_key} 的道具 {item_key}"
-                f" 数量无效（应为正整数）：{count!r}"
-            )
-            continue
-        user_items[item_key] = count_value
-    return user_items
+        count = row["count"]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            issues.append(f"群 {group_id} 成员 {user_id} 的道具数量无效：{count!r}")
+    return issues
 
 
-def summary(data: _Inventory) -> str:
+def summary(conn: sqlite3.Connection) -> str:
     """verify 命令的摘要文本。"""
-    members = sum(len(group) for group in data.values())
-    items = sum(
-        len(user_items) for group in data.values() for user_items in group.values()
-    )
-    return f"{len(data)} 个群、{members} 名成员、{items} 条道具记录"
+    row = conn.execute(
+        f"SELECT COUNT(DISTINCT group_id),"
+        f" COUNT(DISTINCT group_id || '-' || user_id), COUNT(*) FROM {TABLE}"
+    ).fetchone()
+    return f"{int(row[0])} 个群、{int(row[1])} 名成员、{int(row[2])} 条道具记录"
+
+
+def _is_item_id(value: Any) -> bool:
+    """判断是否为三位数字的道具编号。"""
+    return isinstance(value, str) and len(value) == _ITEM_ID_LENGTH and value.isdigit()
+
+
+def _as_int(text: str, label: str) -> int:
+    """把命令行给出的群号/QQ 号转为正整数（无效时报错拒绝）。"""
+    value = text.strip()
+    if not value.isdigit() or int(value) <= 0:
+        message = f"{label}必须为正整数：{text!r}"
+        raise _pipeline.SafetyError(message)
+    return int(value)
 
 
 def normalize_item_id(raw: str) -> str:
@@ -91,52 +77,6 @@ def normalize_item_id(raw: str) -> str:
     return f"{int(text):03d}"
 
 
-def _read(ctx: _pipeline.Context) -> tuple[_Inventory, int | None]:
-    """读取并严格校验库存数据，返回（数据, 原文件修改时间）。"""
-    path = ctx.data_dir / FILE_REL
-    mtime = _pipeline.current_mtime_ns(path)
-    raw = _pipeline.load_json_if_exists(path, LABEL)
-    data, issues = normalize(raw if raw is not None else {})
-    if issues:
-        raise _pipeline.issues_error(LABEL, issues)
-    return data, mtime
-
-
-def _items_text(user_items: _UserItems) -> str:
-    """成员道具的紧凑展示文本。"""
-    return "  ".join(
-        f"{item_key}x{user_items[item_key]}" for item_key in sorted(user_items)
-    )
-
-
-def run_get(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
-    """查看某成员的道具。"""
-    data, _ = _read(ctx)
-    group = data.get(args.group)
-    user_items = group.get(args.user) if group else None
-    if not user_items:
-        print(f"群 {args.group} 成员 {args.user} 没有道具记录。")
-        return 0
-    total = sum(user_items.values())
-    print(f"群 {args.group} 成员 {args.user} 的道具（共 {total} 件）：")
-    for item_key in sorted(user_items):
-        print(f"  {item_key} x{user_items[item_key]}")
-    return 0
-
-
-def run_list(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
-    """列出某群全部成员的道具。"""
-    data, _ = _read(ctx)
-    group = data.get(args.group)
-    if not group:
-        print(f"群 {args.group} 没有道具记录。")
-        return 0
-    print(f"群 {args.group} 共 {len(group)} 名成员有道具记录：")
-    for user_key in sorted(group, key=int):
-        print(f"  {user_key}：{_items_text(group[user_key])}")
-    return 0
-
-
 def _check_count(count: int) -> None:
     """校验数量参数为正整数。"""
     if count < 1:
@@ -144,40 +84,124 @@ def _check_count(count: int) -> None:
         raise _pipeline.SafetyError(message)
 
 
+def _connect(ctx: _pipeline.Context) -> sqlite3.Connection:
+    """打开数据库（只确认库存表存在）。"""
+    return _pipeline.connect_db(ctx, [TABLE])
+
+
+def _count_of(
+    ctx: _pipeline.Context, group_id: int, user_id: int, item_id: str
+) -> int | None:
+    """读取成员某道具的数量（没有该条目时返回 None）。"""
+    conn = _connect(ctx)
+    try:
+        row = conn.execute(
+            f"SELECT count FROM {TABLE}"
+            " WHERE group_id = ? AND user_id = ? AND item_id = ?",
+            (group_id, user_id, item_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else int(row["count"])
+
+
+def _items_text(items: list[sqlite3.Row]) -> str:
+    """成员道具的紧凑展示文本。"""
+    return "  ".join(f"{row['item_id']}x{int(row['count'])}" for row in items)
+
+
+def _execute(
+    ctx: _pipeline.Context,
+    changes: list[str],
+    apply: Callable[[sqlite3.Connection], None],
+) -> None:
+    """把库存表的修改交给公共管线（门禁、备份、单事务）。"""
+    _pipeline.execute_change(
+        ctx,
+        _pipeline.DbChangePlan(label=LABEL, changes=changes, apply=apply),
+        tables=[TABLE],
+    )
+
+
+def run_get(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
+    """查看某成员的道具。"""
+    group_id = _as_int(args.group, "群号")
+    user_id = _as_int(args.user, "QQ 号")
+    conn = _connect(ctx)
+    try:
+        rows = conn.execute(
+            f"SELECT item_id, count FROM {TABLE}"
+            " WHERE group_id = ? AND user_id = ? ORDER BY item_id",
+            (group_id, user_id),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        print(f"群 {args.group} 成员 {args.user} 没有道具记录。")
+        return 0
+    total = sum(int(row["count"]) for row in rows)
+    print(f"群 {args.group} 成员 {args.user} 的道具（共 {total} 件）：")
+    for row in rows:
+        print(f"  {row['item_id']} x{int(row['count'])}")
+    return 0
+
+
+def run_list(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
+    """列出某群全部成员的道具。"""
+    group_id = _as_int(args.group, "群号")
+    conn = _connect(ctx)
+    try:
+        rows = conn.execute(
+            f"SELECT user_id, item_id, count FROM {TABLE}"
+            " WHERE group_id = ? ORDER BY user_id, item_id",
+            (group_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        print(f"群 {args.group} 没有道具记录。")
+        return 0
+    grouped: dict[int, list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped.setdefault(int(row["user_id"]), []).append(row)
+    print(f"群 {args.group} 共 {len(grouped)} 名成员有道具记录：")
+    for user_id in sorted(grouped):
+        print(f"  {user_id}：{_items_text(grouped[user_id])}")
+    return 0
+
+
 def run_give(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
     """给成员增加道具数量（没有该道具时新建条目）。"""
+    group_id = _as_int(args.group, "群号")
+    user_id = _as_int(args.user, "QQ 号")
     item_id = normalize_item_id(args.item)
     _check_count(args.count)
-    data, mtime = _read(ctx)
-    group = data.setdefault(args.group, {})
-    user_items = group.setdefault(args.user, {})
-    old = user_items.get(item_id, 0)
-    user_items[item_id] = old + args.count
+    old = _count_of(ctx, group_id, user_id, item_id) or 0
     changes = [
         f"成员 {args.user} 道具 {item_id}：{old} -> {old + args.count}（+{args.count}）"
     ]
-    _pipeline.execute_change(
-        ctx,
-        _pipeline.ChangePlan(
-            path=ctx.data_dir / FILE_REL,
-            label=LABEL,
-            changes=changes,
-            new_data=data,
-            validator=normalize,
-            expected_mtime_ns=mtime,
-        ),
-    )
+
+    def apply(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            f"INSERT INTO {TABLE} (group_id, user_id, item_id, count)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (group_id, user_id, item_id) DO UPDATE SET"
+            " count = count + excluded.count",
+            (group_id, user_id, item_id, args.count),
+        )
+
+    _execute(ctx, changes, apply)
     return 0
 
 
 def run_take(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
     """从成员处扣除道具数量（扣到 0 时移除条目）。"""
+    group_id = _as_int(args.group, "群号")
+    user_id = _as_int(args.user, "QQ 号")
     item_id = normalize_item_id(args.item)
     _check_count(args.count)
-    data, mtime = _read(ctx)
-    group = data.get(args.group)
-    old = group.get(args.user, {}).get(item_id) if group else None
-    if group is None or old is None:
+    old = _count_of(ctx, group_id, user_id, item_id)
+    if old is None:
         message = f"群 {args.group} 成员 {args.user} 没有道具 {item_id}。"
         raise _pipeline.SafetyError(message)
     if args.count > old:
@@ -188,78 +212,76 @@ def run_take(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
         raise _pipeline.SafetyError(message)
     remaining = old - args.count
     if remaining == 0:
-        del group[args.user][item_id]
         changes = [f"成员 {args.user} 道具 {item_id}：{old} -> 0（已移除条目）"]
     else:
-        group[args.user][item_id] = remaining
         changes = [
             f"成员 {args.user} 道具 {item_id}：{old} -> {remaining}（-{args.count}）"
         ]
-    _pipeline.execute_change(
-        ctx,
-        _pipeline.ChangePlan(
-            path=ctx.data_dir / FILE_REL,
-            label=LABEL,
-            changes=changes,
-            new_data=data,
-            validator=normalize,
-            expected_mtime_ns=mtime,
-        ),
-    )
+
+    def apply(conn: sqlite3.Connection) -> None:
+        where = " WHERE group_id = ? AND user_id = ? AND item_id = ? AND count = ?"
+        params = (group_id, user_id, item_id, old)
+        if remaining == 0:
+            cursor = conn.execute(f"DELETE FROM {TABLE}{where}", params)
+        else:
+            cursor = conn.execute(
+                f"UPDATE {TABLE} SET count = ?{where}", (remaining, *params)
+            )
+        if cursor.rowcount != 1:
+            message = "成员道具数量在本次操作期间发生变化，已回滚，请重试。"
+            raise _pipeline.SafetyError(message)
+
+    _execute(ctx, changes, apply)
     return 0
 
 
 def run_set(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
     """直接设定道具数量（设为 0 请用 del 删除条目）。"""
+    group_id = _as_int(args.group, "群号")
+    user_id = _as_int(args.user, "QQ 号")
     item_id = normalize_item_id(args.item)
-    if args.count < 1:
-        message = f"数量必须为正整数（设为 0 请用 del 删除条目）：{args.count}"
-        raise _pipeline.SafetyError(message)
-    data, mtime = _read(ctx)
-    group = data.setdefault(args.group, {})
-    user_items = group.setdefault(args.user, {})
-    old = user_items.get(item_id, 0)
+    _check_count(args.count)
+    old = _count_of(ctx, group_id, user_id, item_id) or 0
     if old == args.count:
         print("没有需要修改的内容（数据与目标值一致）。")
         return 0
-    user_items[item_id] = args.count
     changes = [f"成员 {args.user} 道具 {item_id}：{old} -> {args.count}"]
-    _pipeline.execute_change(
-        ctx,
-        _pipeline.ChangePlan(
-            path=ctx.data_dir / FILE_REL,
-            label=LABEL,
-            changes=changes,
-            new_data=data,
-            validator=normalize,
-            expected_mtime_ns=mtime,
-        ),
-    )
+
+    def apply(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            f"INSERT INTO {TABLE} (group_id, user_id, item_id, count)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (group_id, user_id, item_id) DO UPDATE SET"
+            " count = excluded.count",
+            (group_id, user_id, item_id, args.count),
+        )
+
+    _execute(ctx, changes, apply)
     return 0
 
 
 def run_del(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
     """删除成员的道具条目。"""
+    group_id = _as_int(args.group, "群号")
+    user_id = _as_int(args.user, "QQ 号")
     item_id = normalize_item_id(args.item)
-    data, mtime = _read(ctx)
-    group = data.get(args.group)
-    old = group.get(args.user, {}).get(item_id) if group else None
-    if group is None or old is None:
+    old = _count_of(ctx, group_id, user_id, item_id)
+    if old is None:
         message = f"群 {args.group} 成员 {args.user} 没有道具 {item_id}。"
         raise _pipeline.SafetyError(message)
-    del group[args.user][item_id]
     changes = [f"删除成员 {args.user} 的道具 {item_id}（原 x{old}）"]
-    _pipeline.execute_change(
-        ctx,
-        _pipeline.ChangePlan(
-            path=ctx.data_dir / FILE_REL,
-            label=LABEL,
-            changes=changes,
-            new_data=data,
-            validator=normalize,
-            expected_mtime_ns=mtime,
-        ),
-    )
+
+    def apply(conn: sqlite3.Connection) -> None:
+        cursor = conn.execute(
+            f"DELETE FROM {TABLE}"
+            " WHERE group_id = ? AND user_id = ? AND item_id = ? AND count = ?",
+            (group_id, user_id, item_id, old),
+        )
+        if cursor.rowcount != 1:
+            message = "成员道具数量在本次操作期间发生变化，已回滚，请重试。"
+            raise _pipeline.SafetyError(message)
+
+    _execute(ctx, changes, apply)
     return 0
 
 
@@ -277,7 +299,7 @@ def _add_item_args(parser: argparse.ArgumentParser, *, with_count: bool) -> None
 
 def register(subparsers: Any) -> None:
     """注册 inventory 子命令。"""
-    parser = subparsers.add_parser("inventory", help="道具库存（item/inventory.json）")
+    parser = subparsers.add_parser("inventory", help=f"道具库存（{TABLE}）")
     _pipeline.add_global_options(parser, suppressed=True)
     verbs = parser.add_subparsers(dest="verb", required=True, metavar="<子命令>")
 

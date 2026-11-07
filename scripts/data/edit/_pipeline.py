@@ -1,25 +1,30 @@
-"""数据文件安全编辑的公共管线。
+"""数据安全编辑的公共管线（数据库版）。
 
 修改类操作固定经过：机器人服务运行检查（运行中拒绝）-> 交互确认 ->
-自动备份 -> 原子替换写盘；任何一步失败都不会触碰原文件。本模块不
-导入任何插件代码，仅与各插件数据文件的格式约定保持一致（各数据
-模块内注明对应的插件源码）。
+数据库快照备份 -> 单事务写入；任何一步失败都不会留下部分修改。本模块
+不导入任何插件代码，表名与列名与插件模型保持一致（各数据模块内注明
+对应的插件源码），表结构变更时必须同步维护。
 """
 
 import argparse
 import json
-import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
-import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# 数据库文件相对数据目录的路径（nonebot-plugin-orm 的插件数据目录）
+DB_REL = Path("nonebot_plugin_orm") / "db.sqlite3"
+
+# 表结构迁移命令（缺少数据库或表时提示使用者先执行）
+_MIGRATE_HINT = "python -m scripts.data.orm upgrade head"
 
 # 备份目录名（位于数据目录下，与插件的插件名子目录互不冲突）
 _BACKUP_DIR_NAME = "_backup"
@@ -60,26 +65,17 @@ class Context:
 
 
 @dataclass
-class ChangePlan:
-    """一次待执行的单文件修改（由数据模块构造后交给 execute_change）。"""
-
-    path: Path
-    """目标数据文件路径。"""
+class DbChangePlan:
+    """一次待执行的数据修改（由数据模块构造后交给 execute_change）。"""
 
     label: str
-    """数据文件的展示名（用于输出与报错）。"""
+    """数据表的展示名（用于输出与报错）。"""
 
     changes: list[str]
     """变更摘要行（为空表示数据与目标值一致，无需修改）。"""
 
-    new_data: Any
-    """修改后的完整数据（写盘前会再经 validator 复验并采用其清理结果）。"""
-
-    validator: Callable[[Any], tuple[Any, list[str]]]
-    """数据模块的校验函数（返回值同 normalize：干净数据 + 问题列表）。"""
-
-    expected_mtime_ns: int | None
-    """读取原文件时记录的修改时间（纳秒）；None 表示当时文件不存在。"""
+    apply: Callable[[sqlite3.Connection], None]
+    """在写事务内执行的修改语句（抛异常时整体回滚）。"""
 
 
 def default_data_dir() -> Path:
@@ -97,12 +93,48 @@ def is_digits(value: Any) -> bool:
     return isinstance(value, str) and value.isdigit()
 
 
-def current_mtime_ns(path: Path) -> int | None:
-    """返回文件的修改时间（纳秒）；文件不存在时返回 None。"""
+def db_path(data_dir: Path) -> Path:
+    """数据库文件路径（数据目录下的 nonebot_plugin_orm/db.sqlite3）。"""
+    return data_dir / DB_REL
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """判断数据库中存在指定表。"""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def connect_db(
+    ctx: Context, tables: Sequence[str], *, db: Path | None = None
+) -> sqlite3.Connection:
+    """打开数据库并确认所需的表存在，返回以列名访问的连接（调用方负责关闭）。
+
+    db 为 None 时使用数据目录下的默认数据库路径（迁移脚本可指定其它库）。
+    """
+    path = db_path(ctx.data_dir) if db is None else db
+    if not path.is_file():
+        message = (
+            f"数据库文件不存在：{path}\n"
+            f"  请先在项目根目录执行表结构迁移：{_MIGRATE_HINT}"
+        )
+        raise SafetyError(message)
     try:
-        return path.stat().st_mtime_ns
-    except OSError:
-        return None
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        missing = [name for name in tables if not _table_exists(conn, name)]
+    except sqlite3.Error as exc:
+        message = f"打开数据库失败（{path}）：{exc}"
+        raise SafetyError(message) from exc
+    if missing:
+        conn.close()
+        message = (
+            f"数据库缺少表：{'、'.join(missing)}\n"
+            f"  请先在项目根目录执行表结构迁移：{_MIGRATE_HINT}"
+        )
+        raise SafetyError(message)
+    return conn
 
 
 def load_json_if_exists(path: Path, label: str) -> Any | None:
@@ -252,34 +284,29 @@ def prune_backup_sets(root: Path) -> None:
         shutil.rmtree(old, ignore_errors=True)
 
 
-def write_json_atomic(path: Path, data: Any) -> None:
-    """以临时文件 + 原子替换写入 JSON（UTF-8、缩进 2、中文不转义）。
+def backup_database(ctx: Context, backup_set: Path) -> Path:
+    """把当前数据库快照到备份集目录，返回备份文件路径。
 
-    写入格式与各插件 save 函数一致；替换失败时原文件保持不变。
+    快照用 `VACUUM INTO` 生成：内容一致、不含未提交的改动，也不会
+    继承 -wal/-shm 残留；备份集里的文件可直接拷回作为数据库文件使用。
     """
-    text = json.dumps(data, ensure_ascii=False, indent=2)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    source = db_path(ctx.data_dir)
+    target = backup_set / DB_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-        )
-    except OSError as exc:
-        message = f"创建临时文件失败，未修改原文件：{exc}"
+        conn = sqlite3.connect(source)
+    except sqlite3.Error as exc:
+        message = f"打开数据库失败（{source}）：{exc}"
         raise SafetyError(message) from exc
-    tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if path.exists():
-            with suppress(OSError):
-                tmp.chmod(path.stat().st_mode & 0o777)
-        tmp.replace(path)
-    except OSError as exc:
-        tmp.unlink(missing_ok=True)
-        message = f"写入数据文件失败，原文件未修改：{exc}"
+        conn.execute("VACUUM INTO ?", (str(target),))
+    except sqlite3.Error as exc:
+        target.unlink(missing_ok=True)
+        message = f"备份数据库失败，已中止（未修改数据）：{exc}"
         raise SafetyError(message) from exc
+    finally:
+        conn.close()
+    return target
 
 
 def confirm(ctx: Context) -> None:
@@ -298,49 +325,41 @@ def confirm(ctx: Context) -> None:
         raise OperationCancelledError("已取消，未做任何修改。")
 
 
-def execute_change(ctx: Context, plan: ChangePlan) -> None:
-    """执行一次安全修改：服务门禁 -> 预览 -> 确认 -> 备份 -> 原子写盘。"""
+def execute_change(ctx: Context, plan: DbChangePlan, *, tables: Sequence[str]) -> None:
+    """执行一次安全修改：服务门禁 -> 预览 -> 确认 -> 快照备份 -> 单事务写入。"""
     if not plan.changes:
         print("没有需要修改的内容（数据与目标值一致）。")
         return
     state, raw = service_state(ctx.service_name)
     enforce_service_gate(ctx, state, raw)
-    print(f"[目标] {plan.label}（{plan.path}）")
+    print(f"[目标] {plan.label}（{db_path(ctx.data_dir)}）")
     print("将执行以下修改：")
     for line in plan.changes:
         print(f"  - {line}")
     if ctx.dry_run:
-        print("[dry-run] 已预览全部变更，未写入磁盘。")
+        print("[dry-run] 已预览全部变更，未写入数据库。")
         return
     confirm(ctx)
-    backup_path: Path | None = None
     with data_lock(ctx.data_dir):
-        if current_mtime_ns(plan.path) != plan.expected_mtime_ns:
-            message = (
-                "数据文件在本次操作期间被其它进程修改（可能机器人仍在运行），"
-                "已拒绝写入，请重试。"
-            )
-            raise SafetyError(message)
-        clean, issues = plan.validator(plan.new_data)
-        if issues:
-            message = "内部错误：待写入数据未通过校验：" + "；".join(issues)
-            raise SafetyError(message)
-        if plan.path.exists():
-            backup_set = make_backup_set(ctx.data_dir)
-            backup_path = backup_set / plan.path.relative_to(ctx.data_dir)
-            backup_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.copy2(plan.path, backup_path)
-            except OSError as exc:
-                message = f"备份原文件失败，已中止（原文件未修改）：{exc}"
-                raise SafetyError(message) from exc
-        write_json_atomic(plan.path, clean)
-    print(f"[完成] 已更新：{plan.path}")
-    if backup_path is None:
-        print("[备份] 原文件不存在，本次为新建，无需备份。")
-    else:
-        print(f"[备份] {backup_path}")
-        print(f'[回滚] cp "{backup_path}" "{plan.path}"')
+        backup_path = backup_database(ctx, make_backup_set(ctx.data_dir))
+        conn = connect_db(ctx, tables)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            plan.apply(conn)
+            conn.commit()
+        except sqlite3.Error as exc:
+            with suppress(sqlite3.Error):
+                conn.rollback()
+            message = f"写入数据库失败，已整体回滚：{exc}"
+            raise SafetyError(message) from exc
+        finally:
+            conn.close()
+    print(f"[完成] 已更新：{plan.label}")
+    print(f"[备份] {backup_path}")
+    print(
+        f'[回滚] cp "{backup_path}" "{db_path(ctx.data_dir)}"'
+        "（并删除同目录下的 -wal/-shm 文件）"
+    )
     if state == "unavailable":
         print("[下一步] 请按你的方式重启机器人使修改生效。")
     else:

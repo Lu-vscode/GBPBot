@@ -98,7 +98,7 @@ def _state_name(data: dict[str, Any], user_id: int) -> str:
     return truncate_name(raw, _NICKNAME_MAX_LENGTH)
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：@ 传递对象且不为自己或机器人；返回错误文案时本次不消耗。"""
     target_id = context.target_id
     if context.args or target_id is None:
@@ -116,7 +116,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     if target_id is None:
         # 不可达：can_use 已校验目标存在
         return
-    layers = _layers_of(get_state(context.group_id, context.user_id, _STATE_KEY))
+    layers = _layers_of(await get_state(context.group_id, context.user_id, _STATE_KEY))
     target_name = await member_display_name(
         context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
     )
@@ -124,10 +124,12 @@ async def _handle_use(context: ItemUseContext) -> None:
     score = gained * _SCORE_PER_LAYER
     # 同步段：判定并完成全部数据变更（状态、道具与分数），再发送播报
     if random.random() < _CHANCE_BASE ** (-layers):
-        remove_state(context.group_id, context.user_id, _STATE_KEY)
-        context.add_score(score)
-        target_layers = _layers_of(get_state(context.group_id, target_id, _STATE_KEY))
-        add_state(
+        await remove_state(context.group_id, context.user_id, _STATE_KEY)
+        await context.add_score(score)
+        target_layers = _layers_of(
+            await get_state(context.group_id, target_id, _STATE_KEY)
+        )
+        await add_state(
             context.group_id,
             target_id,
             state=ItemState(
@@ -137,7 +139,7 @@ async def _handle_use(context: ItemUseContext) -> None:
             ),
             duration_seconds=_STATE_SECONDS,
         )
-        add_item(context.group_id, target_id, _ITEM_ID)
+        await add_item(context.group_id, target_id, _ITEM_ID)
         total = f"（共 {target_layers + gained} 层）" if target_layers else ""
         await context.send(
             f"{context.user_name} 使用了 {context.item.label}，花传了出去。\n"
@@ -146,8 +148,8 @@ async def _handle_use(context: ItemUseContext) -> None:
             f"{context.user_name} 决斗分数 +{score}。"
         )
         return
-    remove_state(context.group_id, context.user_id, _STATE_KEY)
-    context.add_score(-score)
+    await remove_state(context.group_id, context.user_id, _STATE_KEY)
+    await context.add_score(-score)
     await context.send(
         f"{context.user_name} 使用了 {context.item.label}，鼓声一停，花掉了。\n"
         f"{context.user_name} 的 {layers} 层“泡沫”散了，决斗分数 -{score}。"
@@ -292,7 +294,7 @@ async def _handle_state_expire(context: ItemStateExpireContext) -> None:
         return
     name = _state_name(context.state.data, context.user_id)
     score = layers * _SCORE_PER_LAYER
-    add_user_score(context.group_id, context.user_id, name, -score)
+    await add_user_score(context.group_id, context.user_id, name, -score)
     defer_reminder(
         group_id=context.group_id,
         text=(

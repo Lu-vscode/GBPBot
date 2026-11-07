@@ -41,21 +41,23 @@ _NO_DUEL = "你们之间没有进行中的决斗。"
 _CANCEL_FAILED = "使用失败：该决斗已不在进行中，道具已退还。"
 
 
-def _find_duel(group_id: int, user_id: int, target_id: int) -> DuelSnapshot | None:
+async def _find_duel(
+    group_id: int, user_id: int, target_id: int
+) -> DuelSnapshot | None:
     """查找双方之间进行中的决斗快照（不限发起方向与是否已接受）。"""
-    for snapshot in _state_service.list_duels(group_id):
+    for snapshot in await _state_service.list_duels(group_id):
         if {snapshot.challenger_id, snapshot.opponent_id} == {user_id, target_id}:
             return snapshot
     return None
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：@ 一位成员且双方之间存在进行中的决斗；返回错误文案时本次不消耗。"""
     if context.args or context.target_id is None:
         return _USAGE
     if context.target_id == context.user_id:
         return f"不能对自己使用 {context.item.label}。"
-    if _find_duel(context.group_id, context.user_id, context.target_id) is None:
+    if await _find_duel(context.group_id, context.user_id, context.target_id) is None:
         return _NO_DUEL
     return None
 
@@ -77,12 +79,12 @@ async def _handle_use(context: ItemUseContext) -> None:
         context.group_id, context.user_id, target_id
     )
     if snapshot is None:
-        # 不可达：can_use 与消耗同处同步段，决斗状态不会在期间改变
+        # 不可达：check 与消耗在同一把群锁内，决斗状态不会在期间改变
         logger.error(
             f"逃之夭夭：消耗后决斗取消未成功，道具已退还"
             f"（群 {context.group_id}，成员 {context.user_id}）"
         )
-        add_item(context.group_id, context.user_id, _ITEM_ID)
+        await add_item(context.group_id, context.user_id, _ITEM_ID)
         await context.send(_CANCEL_FAILED)
         return
     target_name = _target_name(snapshot, context.user_id)

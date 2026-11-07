@@ -70,7 +70,7 @@ def _materials(args: tuple[str, ...]) -> tuple[ItemDefinition, ItemDefinition] |
     return first, second
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：两个道具编号、与本保险同品质、数量足够且可交易；
     返回错误文案时本次不消耗。"""
     args = context.args
@@ -92,7 +92,7 @@ def _can_use(context: ItemUseContext) -> str | None:
             f"{quality_label(context.item.quality)}道具，"
             f"{first.label}、{second.label} 不符合要求。"
         )
-    return craft_error(context.group_id, context.user_id, first, second)
+    return await craft_error(context.group_id, context.user_id, first, second)
 
 
 async def _handle_use(context: ItemUseContext) -> None:
@@ -118,12 +118,12 @@ async def _handle_use(context: ItemUseContext) -> None:
         return
     prefix, results = drawn
     # 同步段：消耗材料并登记产物（黑色诅咒不写入库存，走诅咒获得流程）
-    remove_items(
+    await remove_items(
         context.group_id,
         context.user_id,
         [(first.item_id, 1), (second.item_id, 1)],
     )
-    add_items(
+    await add_items(
         context.group_id,
         context.user_id,
         [
@@ -136,7 +136,9 @@ async def _handle_use(context: ItemUseContext) -> None:
     material_labels = f"{first.label}、{second.label}"
     if prefix == FAILED_PREFIX:
         # 合成失败：返还两件材料，失败的产物保留
-        add_items(context.group_id, context.user_id, [first.item_id, second.item_id])
+        await add_items(
+            context.group_id, context.user_id, [first.item_id, second.item_id]
+        )
         await context.send(
             f"{context.user_name} 使用了 {context.item.label}，{prefix}，"
             f"获得了 {result_labels}。\n"

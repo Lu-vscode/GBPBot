@@ -47,13 +47,15 @@ def _state_key(item_id: str) -> str:
     return f"{item_id}{_STATE_KEY_SUFFIX}"
 
 
-def _remaining_durabilities(group_id: int, user_id: int, item_id: str) -> list[int]:
+async def _remaining_durabilities(
+    group_id: int, user_id: int, item_id: str
+) -> list[int]:
     """返回成员身上处于耗损中的该道具副本的剩余耐久列表。
 
     全新（未使用过）的副本不在列表中；列表中的每一项为某个副本扣除
     使用次数后的剩余耐久（1~总耐久-1），按开始耗损的先后排列。
     """
-    state = get_state(group_id, user_id, _state_key(item_id))
+    state = await get_state(group_id, user_id, _state_key(item_id))
     if state is None:
         return []
     raw = state.data.get(_INSTANCES_KEY)
@@ -66,7 +68,7 @@ def _remaining_durabilities(group_id: int, user_id: int, item_id: str) -> list[i
     ]
 
 
-def _store(
+async def _store(
     group_id: int,
     user_id: int,
     *,
@@ -75,7 +77,7 @@ def _store(
 ) -> None:
     """保存耗损中的副本耐久列表；列表为空时移除状态。"""
     if values:
-        add_state(
+        await add_state(
             group_id,
             user_id,
             state=ItemState(
@@ -85,10 +87,10 @@ def _store(
             ),
         )
         return
-    remove_state(group_id, user_id, _state_key(item_id))
+    await remove_state(group_id, user_id, _state_key(item_id))
 
 
-def _consume(context: ItemUseContext, *, total: int) -> bool:
+async def _consume(context: ItemUseContext, *, total: int) -> bool:
     """消耗一件副本（ItemBehavior.consume 的实现），返回是否成功消耗。
 
     优先对已耗损副本扣 1 点耐久（归零时该副本从库存移除）；没有耗损
@@ -97,39 +99,39 @@ def _consume(context: ItemUseContext, *, total: int) -> bool:
     group_id = context.group_id
     user_id = context.user_id
     item_id = context.item.item_id
-    values = _remaining_durabilities(group_id, user_id, item_id)
+    values = await _remaining_durabilities(group_id, user_id, item_id)
     if values:
         values[0] -= 1
         if values[0] <= 0:
             # 该副本耐久归零：道具消失（从库存移除，状态随列表清空清理）
             values.pop(0)
-            if not remove_item(group_id, user_id, item_id):
+            if not await remove_item(group_id, user_id, item_id):
                 logger.error(
                     f"{context.item.name}：耐久归零的副本未能从库存移除"
                     f"（群 {group_id}，成员 {user_id}）"
                 )
-        _store(group_id, user_id, item_id=item_id, values=values)
+        await _store(group_id, user_id, item_id=item_id, values=values)
         return True
-    if get_item_count(group_id, user_id, item_id) < 1:
-        # 不可达：主模块已在同步段校验持有道具
+    if await get_item_count(group_id, user_id, item_id) < 1:
+        # 调用方已在群锁内校验持有道具，走到这里说明库存与校验不一致
         return False
-    _store(group_id, user_id, item_id=item_id, values=[total - 1])
+    await _store(group_id, user_id, item_id=item_id, values=[total - 1])
     return True
 
 
-def _transferable_count(group_id: int, user_id: int, item_id: str) -> int:
+async def _transferable_count(group_id: int, user_id: int, item_id: str) -> int:
     """返回可用于交换/合成的副本数量（ItemBehavior.transferable 的实现）。
 
     只有全新副本可交易：库存数量扣除处于耗损中的副本数。
     """
     return max(
         0,
-        get_item_count(group_id, user_id, item_id)
-        - len(_remaining_durabilities(group_id, user_id, item_id)),
+        await get_item_count(group_id, user_id, item_id)
+        - len(await _remaining_durabilities(group_id, user_id, item_id)),
     )
 
 
-def _durability_text(
+async def _durability_text(
     group_id: int,
     user_id: int,
     item_id: str,
@@ -143,14 +145,14 @@ def _durability_text(
     满耐久。display_total 为耐久条目的分母（展示用总耐久），默认与总
     耐久一致；供展示总耐久与实际总耐久不同的道具使用（如 4/1000000）。
     """
-    values = _remaining_durabilities(group_id, user_id, item_id)
+    values = await _remaining_durabilities(group_id, user_id, item_id)
     shown_total = total if display_total is None else display_total
     if values:
         return f"{values[0]}/{shown_total}"
     return f"{total}/{shown_total}"
 
 
-def move_damaged_instance(
+async def move_damaged_instance(
     group_id: int,
     from_user: int,
     to_user: int,
@@ -162,16 +164,16 @@ def move_damaged_instance(
     副本时不作修改并返回 None（此时转移的是全新副本）。调用方应在完成
     库存转移后调用；接收方的耗损记录追加在其列表末尾。
     """
-    values = _remaining_durabilities(group_id, from_user, item_id)
+    values = await _remaining_durabilities(group_id, from_user, item_id)
     if not values:
         return None
     remaining = values.pop(0)
-    _store(group_id, from_user, item_id=item_id, values=values)
-    _store(
+    await _store(group_id, from_user, item_id=item_id, values=values)
+    await _store(
         group_id,
         to_user,
         item_id=item_id,
-        values=[*_remaining_durabilities(group_id, to_user, item_id), remaining],
+        values=[*await _remaining_durabilities(group_id, to_user, item_id), remaining],
     )
     return remaining
 
@@ -180,7 +182,7 @@ def durable_behavior(
     *,
     total: int,
     display_total: int | None = None,
-    check: Callable[[ItemUseContext], str | None] | None = None,
+    check: Callable[[ItemUseContext], Awaitable[str | None]] | None = None,
     use: Callable[[ItemUseContext], Awaitable[None]] | None = None,
 ) -> ItemBehavior:
     """返回耐久型道具的行为块：消耗、可交易数量与详情耐久由本模块提供。

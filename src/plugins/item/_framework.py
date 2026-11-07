@@ -2,8 +2,9 @@
 使用流程、库存与状态 API、随机抽取代数。
 
 道具模块（items/ 下）在导入期调用 register_item 注册道具；新增道具文件
-由 items/__init__.py 自动发现导入，无需修改本文件。库存与状态的加载、
-保存经 _storage.py 完成，本模块维护内存数据并提供操作 API。
+由 items/__init__.py 自动发现导入，无需修改本文件。库存与状态保存在
+数据库（见 _models.py），读写原语在 _store.py，本模块把它们组合成
+道具模块使用的 API。
 
 道具分类有两个互不相交的轴：展示分类 kind（ItemKind，单值、互斥，用于
 详情与统计）与功能标签 ItemTag（可多值，只记录“具备什么机制”，供其它
@@ -26,12 +27,19 @@ from nonebot.plugin import require
 
 from src.plugins._shared.onebot import send_group_forward, send_group_text
 from src.plugins._shared.services import DuelScoreService, require_service
-from src.plugins.item._storage import (
+from src.plugins.item._store import (
     ItemState,
-    load_inventory,
+    add_to_inventory,
+    delete_states,
+    fetch_state,
+    load_item_counts,
     load_states,
-    save_inventory,
-    save_states,
+    select_state_holders,
+    swap_items,
+    take_expired_states,
+    take_from_inventory,
+    update_state_data,
+    upsert_states,
 )
 
 if TYPE_CHECKING:
@@ -117,18 +125,19 @@ class ItemBehavior:
     check/use），避免每件道具重复声明。
     """
 
-    check: Callable[["ItemUseContext"], str | None] | None = None
+    check: Callable[["ItemUseContext"], Awaitable[str | None]] | None = None
     """使用前校验：返回非空错误文案表示本次不可用（此时不消耗）。"""
 
     use: Callable[["ItemUseContext"], Awaitable[None]] | None = None
     """使用效果（成功提示消息由效果自身发送）。"""
 
-    consume: Callable[["ItemUseContext"], bool] | None = None
+    consume: Callable[["ItemUseContext"], Awaitable[bool]] | None = None
     """消耗道具的自定义方式（默认为消耗一件库存）；返回 False 表示未能
     消耗，本次使用中止且不执行效果。耐久型等道具在此自行扣减耐久或移除
-    副本（须为同步函数，在校验与消耗的同步段内执行）。"""
+    副本（由调用方在同一把群锁内 await，校验与消耗之间不会被同群的
+    其它道具操作插入）。"""
 
-    transferable: Callable[[int, int, str], int] | None = None
+    transferable: Callable[[int, int, str], Awaitable[int]] | None = None
     """返回成员可用于交换与合成的该道具副本数量（参数为群号、成员 QQ 号
     与道具编号；默认 None 表示全部库存均可参与）。交换与合成在库存数量
     满足要求后按该数量复核，如耐久耗损的副本可在此排除。"""
@@ -136,7 +145,7 @@ class ItemBehavior:
     expire: _StateExpireHandler | None = None
     """状态到期回调（由定时清理调用；未提供时过期状态只被静默删除）。"""
 
-    durability_text: Callable[[int, int, str], str] | None = None
+    durability_text: Callable[[int, int, str], Awaitable[str]] | None = None
     """详情消息中耐久条目的动态显示（参数为查看者所在群号、其 QQ 号与
     道具编号）；默认 None 表示使用 durability 的静态文本；供道具模块按
     成员状态动态展示（如显示耗损副本的剩余耐久）。"""
@@ -266,9 +275,9 @@ class ItemUseContext:
             self.bot, self.group_id, text, self.reply_to, label="道具消息"
         )
 
-    def add_score(self, delta: int) -> int:
+    async def add_score(self, delta: int) -> int:
         """经决斗分数服务为使用者增减决斗分数，返回更新后的分数。"""
-        return _score_service.add_score(
+        return await _score_service.add_score(
             self.group_id, self.user_id, self.user_name, delta
         )
 
@@ -305,18 +314,20 @@ async def run_item_use(context: ItemUseContext, *, consume: bool = True) -> bool
     """
     behavior = context.item.behavior
     if behavior is not None and behavior.check is not None:
-        error = behavior.check(context)
+        error = await behavior.check(context)
         if error:
             await context.send(error)
             return False
     if consume:
-        consumed = (
-            behavior.consume(context)
-            if behavior is not None and behavior.consume is not None
-            else remove_item(context.group_id, context.user_id, context.item.item_id)
-        )
+        if behavior is not None and behavior.consume is not None:
+            consumed = await behavior.consume(context)
+        else:
+            consumed = await remove_item(
+                context.group_id, context.user_id, context.item.item_id
+            )
         if not consumed:
-            # 不可达：校验与消耗同处同步段，道具状态不会在期间改变
+            # 调用方应在群锁内调用本函数；走到这里说明库存数据与校验结果
+            # 不一致（如被外部改写），按失败处理并提示
             logger.error(
                 f"道具 {context.item.label} 消耗失败（群 {context.group_id}，"
                 f"成员 {context.user_id}）：库存或状态不一致"
@@ -406,7 +417,7 @@ async def run_curse_interceptors(context: ItemUseContext) -> bool:
     return False
 
 
-def detail_text(definition: ItemDefinition, group_id: int, user_id: int) -> str:
+async def detail_text(definition: ItemDefinition, group_id: int, user_id: int) -> str:
     """生成道具的完整信息文本（用于详情与黑色诅咒获得消息）。
 
     耐久条目默认使用定义中的静态文本；行为块提供 durability_text 钩子
@@ -416,7 +427,9 @@ def detail_text(definition: ItemDefinition, group_id: int, user_id: int) -> str:
     durability = definition.durability
     behavior = definition.behavior
     if behavior is not None and behavior.durability_text is not None:
-        durability = behavior.durability_text(group_id, user_id, definition.item_id)
+        durability = await behavior.durability_text(
+            group_id, user_id, definition.item_id
+        )
     lines = [
         f"编号：{definition.item_id}",
         f"名称：{definition.name}",
@@ -458,7 +471,7 @@ async def acquire_curse(
         group_id,
         [
             f"你获得了黑色诅咒道具：{definition.label}！\n"
-            f"{detail_text(definition, group_id, user_id)}"
+            f"{await detail_text(definition, group_id, user_id)}"
         ],
         node_name="道具详情",
         label="诅咒道具信息",
@@ -477,30 +490,30 @@ async def acquire_curse(
     await run_item_use(context, consume=False)
 
 
-def get_user_score(group_id: int, user_id: int) -> int:
+async def get_user_score(group_id: int, user_id: int) -> int:
     """查询成员在指定群的决斗分数（供无使用上下文的场景调用）。"""
-    return _score_service.get_score(group_id, user_id)
+    return await _score_service.get_score(group_id, user_id)
 
 
-def get_lowest_score_user(group_id: int) -> int | None:
+async def get_lowest_score_user(group_id: int) -> int | None:
     """查询指定群决斗低分榜第一名的成员 QQ 号（无负分成员时返回 None）。
 
     低分榜的判定与决斗插件的 /duel.rank 低分榜一致；供道具模块校验
     "位列决斗低分榜第一名"等使用条件。
     """
-    return _score_service.lowest_member(group_id)
+    return await _score_service.lowest_member(group_id)
 
 
-def get_highest_score_user(group_id: int) -> int | None:
+async def get_highest_score_user(group_id: int) -> int | None:
     """查询指定群决斗高分榜第一名的成员 QQ 号（无正分成员时返回 None）。
 
     高分榜的判定与决斗插件的 /duel.rank 高分榜一致；供道具模块校验
     "位列决斗高分榜第一名"等使用条件。
     """
-    return _score_service.highest_member(group_id)
+    return await _score_service.highest_member(group_id)
 
 
-def get_rank_entries(group_id: int) -> list[tuple[int, str, int]]:
+async def get_rank_entries(group_id: int) -> list[tuple[int, str, int]]:
     """查询指定群决斗分数总榜的全部条目 (QQ 号, 昵称, 分数)。
 
     总榜为决斗高分榜与反转的决斗低分榜的拼接：全部非零分数的成员
@@ -508,31 +521,35 @@ def get_rank_entries(group_id: int) -> list[tuple[int, str, int]]:
     成员不在榜上；供道具模块遍历全部非零分数成员（如全体加 1 分、
     随机抽选）或按榜上相邻位置处理（如交换分数）。
     """
-    return _score_service.rank_entries(group_id)
+    return await _score_service.rank_entries(group_id)
 
 
-def add_user_score(group_id: int, user_id: int, user_name: str, delta: int) -> int:
+async def add_user_score(
+    group_id: int, user_id: int, user_name: str, delta: int
+) -> int:
     """经决斗分数服务为成员增减决斗分数，返回更新后的分数。
 
     供状态到期回调等没有 ItemUseContext 的场景使用。
     """
-    return _score_service.add_score(group_id, user_id, user_name, delta)
+    return await _score_service.add_score(group_id, user_id, user_name, delta)
 
 
-def add_user_scores(group_id: int, entries: Sequence[tuple[int, str, int]]) -> None:
-    """批量增减多名成员的决斗分数，只落盘一次。
+async def add_user_scores(
+    group_id: int, entries: Sequence[tuple[int, str, int]]
+) -> None:
+    """批量增减多名成员的决斗分数，同一个事务内写入。
 
     entries 为 (成员 QQ 号, 显示名, 分数变化量) 序列，按顺序应用；
     各成员的变化量仍会依次经过分数改变拦截器链。供「五谷丰登」等
     一次影响全群成员的道具效果使用。
     """
     if entries:
-        _score_service.add_scores(group_id, entries)
+        await _score_service.add_scores(group_id, entries)
 
 
 # 签到分数加成提供者：接收 (群号, 成员 QQ 号)，返回本次签到额外增加的
 # 决斗分数（非正整数或执行出错时按无加成处理）
-SignBonusProvider = Callable[[int, int], int]
+SignBonusProvider = Callable[[int, int], Awaitable[int]]
 
 # 已登记的加成提供者：来源道具编号 -> 提供者（同编号登记覆盖，重复
 # 导入安全）
@@ -552,7 +569,7 @@ def set_sign_bonus_provider(item_id: str, provider: SignBonusProvider) -> None:
     _sign_bonus_providers[item_id] = provider
 
 
-def sign_bonus(group_id: int, user_id: int) -> int:
+async def sign_bonus(group_id: int, user_id: int) -> int:
     """返回成员本次签到额外获得的决斗分数（各提供者之和，无加成时为 0）。
 
     供签到分数加成服务调用；单个提供者抛出的异常或返回的非正整数
@@ -561,7 +578,7 @@ def sign_bonus(group_id: int, user_id: int) -> int:
     total = 0
     for item_id, provider in _sign_bonus_providers.items():
         try:
-            value = provider(group_id, user_id)
+            value = await provider(group_id, user_id)
         except _SIGN_BONUS_ERRORS as exc:
             logger.error(
                 f"签到分数加成提供者执行出错（道具 {item_id}，"
@@ -694,21 +711,9 @@ def state_label(state: ItemState) -> str:
     return state.key
 
 
-# 道具库存内存数据：群号 -> 成员 QQ 号 -> {道具编号 -> 数量}
-_inventory: dict[int, dict[int, dict[str, int]]] = load_inventory()
-# 道具状态内存数据：群号 -> 成员 QQ 号 -> 状态列表
-_states: dict[int, dict[int, list[ItemState]]] = load_states()
-
 # 状态数据的变更序号（单元素列表以便在函数内递增）：每次状态集合
 # 变化时递增，供道具模块缓存由状态派生的数据（见 state_version）
 _states_version = [0]
-
-if _inventory:
-    _holder_count = sum(len(users) for users in _inventory.values())
-    logger.info(f"已加载道具库存，共 {len(_inventory)} 个群、{_holder_count} 名成员")
-if _states:
-    _state_holder_count = sum(len(users) for users in _states.values())
-    logger.info(f"已加载道具状态，共 {len(_states)} 个群、{_state_holder_count} 名成员")
 
 
 def state_version() -> int:
@@ -725,12 +730,13 @@ def _bump_state_version() -> None:
     _states_version[0] += 1
 
 
-def get_item_count(group_id: int, user_id: int, item_id: str) -> int:
+async def get_item_count(group_id: int, user_id: int, item_id: str) -> int:
     """返回成员在指定群拥有的道具数量（无记录时为 0）。"""
-    return _inventory.get(group_id, {}).get(user_id, {}).get(item_id, 0)
+    counts = await load_item_counts(group_id, user_id)
+    return counts.get(item_id, 0)
 
 
-def transferable_count(group_id: int, user_id: int, item_id: str) -> int:
+async def transferable_count(group_id: int, user_id: int, item_id: str) -> int:
     """返回成员可用于交换与合成的道具数量。
 
     道具模块可经 ItemBehavior.transferable 钩子排除不可交易的副本
@@ -739,123 +745,69 @@ def transferable_count(group_id: int, user_id: int, item_id: str) -> int:
     definition = _ITEMS.get(item_id)
     behavior = definition.behavior if definition is not None else None
     if behavior is not None and behavior.transferable is not None:
-        return behavior.transferable(group_id, user_id, item_id)
-    return get_item_count(group_id, user_id, item_id)
+        return await behavior.transferable(group_id, user_id, item_id)
+    return await get_item_count(group_id, user_id, item_id)
 
 
-def add_item(group_id: int, user_id: int, item_id: str, count: int = 1) -> None:
-    """为成员增加道具并落盘。"""
-    items = _inventory.setdefault(group_id, {}).setdefault(user_id, {})
-    items[item_id] = items.get(item_id, 0) + count
-    save_inventory(_inventory)
+async def add_item(group_id: int, user_id: int, item_id: str, count: int = 1) -> None:
+    """为成员增加道具。"""
+    if count <= 0:
+        return
+    await add_to_inventory(group_id, user_id, [(item_id, count)])
 
 
-def add_items(group_id: int, user_id: int, item_ids: Sequence[str]) -> None:
-    """批量增加道具（每件 +1，允许重复编号）并只落盘一次。"""
+async def add_items(group_id: int, user_id: int, item_ids: Sequence[str]) -> None:
+    """批量增加道具（每件 +1，允许重复编号），只写一次数据库。"""
     if not item_ids:
         return
-    items = _inventory.setdefault(group_id, {}).setdefault(user_id, {})
-    for item_id in item_ids:
-        items[item_id] = items.get(item_id, 0) + 1
-    save_inventory(_inventory)
+    await add_to_inventory(group_id, user_id, [(item_id, 1) for item_id in item_ids])
 
 
-def _drop_empty_inventory_levels(group_id: int, user_id: int) -> None:
-    """库存清空后删除成员与群的空层级。"""
-    users = _inventory.get(group_id)
-    if users is None or users.get(user_id):
-        return
-    users.pop(user_id, None)
-    if not users:
-        _inventory.pop(group_id, None)
+async def remove_item(
+    group_id: int, user_id: int, item_id: str, count: int = 1
+) -> bool:
+    """为成员移除道具；数量不足时不做任何事并返回 False。"""
+    return await remove_items(group_id, user_id, [(item_id, count)])
 
 
-def remove_item(group_id: int, user_id: int, item_id: str, count: int = 1) -> bool:
-    """为成员移除道具并落盘；数量不足时不做任何事并返回 False。"""
-    items = _inventory.get(group_id, {}).get(user_id)
-    if items is None:
-        return False
-    current = items.get(item_id, 0)
-    if current < count:
-        return False
-    if current == count:
-        del items[item_id]
-    else:
-        items[item_id] = current - count
-    _drop_empty_inventory_levels(group_id, user_id)
-    save_inventory(_inventory)
-    return True
-
-
-def remove_items(
+async def remove_items(
     group_id: int, user_id: int, entries: Sequence[tuple[str, int]]
 ) -> bool:
-    """批量移除道具并只落盘一次；任一数量不足时不做任何修改并返回 False。
+    """批量移除道具；任一数量不足时不做任何修改并返回 False。
 
     entries 为 (道具编号, 数量) 序列；同一编号在序列中重复出现时，
     各项数量均按库存总量校验，按顺序扣减。
     """
-    items = _inventory.get(group_id, {}).get(user_id)
-    if items is None:
-        return False
-    for item_id, count in entries:
-        if items.get(item_id, 0) < count:
-            return False
-    for item_id, count in entries:
-        current = items[item_id]
-        if current == count:
-            del items[item_id]
-        else:
-            items[item_id] = current - count
-    _drop_empty_inventory_levels(group_id, user_id)
-    save_inventory(_inventory)
-    return True
+    if not entries:
+        return True
+    return await take_from_inventory(group_id, user_id, entries)
 
 
-def _take_one(items: dict[str, int], item_id: str) -> None:
-    """从库存字典中扣减一件道具（数量为 0 时删除条目）。"""
-    if items[item_id] == 1:
-        del items[item_id]
-    else:
-        items[item_id] -= 1
-
-
-def exchange_items(
+async def exchange_items(
     group_id: int,
     initiator_id: int,
     initiator_item_id: str,
     target_id: int,
     target_item_id: str,
 ) -> bool:
-    """把双方各一件道具互换并只落盘一次，返回是否交换成功。
+    """把双方各一件道具互换，返回是否交换成功。
 
     任一方库存不足时不做任何修改并返回 False；双方为同一成员的
     情况由调用方排除。
     """
-    initiator_items = _inventory.get(group_id, {}).get(initiator_id)
-    target_items = _inventory.get(group_id, {}).get(target_id)
-    if initiator_items is None or target_items is None:
-        return False
-    if initiator_items.get(initiator_item_id, 0) < 1:
-        return False
-    if target_items.get(target_item_id, 0) < 1:
-        return False
-    _take_one(initiator_items, initiator_item_id)
-    _take_one(target_items, target_item_id)
-    target_items[initiator_item_id] = target_items.get(initiator_item_id, 0) + 1
-    initiator_items[target_item_id] = initiator_items.get(target_item_id, 0) + 1
-    _drop_empty_inventory_levels(group_id, initiator_id)
-    _drop_empty_inventory_levels(group_id, target_id)
-    save_inventory(_inventory)
-    return True
+    return await swap_items(
+        group_id, initiator_id, initiator_item_id, target_id, target_item_id
+    )
 
 
-def list_user_items(group_id: int, user_id: int) -> list[tuple[ItemDefinition, int]]:
+async def list_user_items(
+    group_id: int, user_id: int
+) -> list[tuple[ItemDefinition, int]]:
     """返回成员拥有的全部道具（定义与数量），按品质由高到低、
     同品质按编号升序排列；库存中未注册的编号跳过并记录 warning。"""
-    items = _inventory.get(group_id, {}).get(user_id, {})
+    counts = await load_item_counts(group_id, user_id)
     result: list[tuple[ItemDefinition, int]] = []
-    for item_id, count in items.items():
+    for item_id, count in counts.items():
         definition = _ITEMS.get(item_id)
         if definition is None:
             logger.warning(f"库存中的道具编号 {item_id} 未注册（可能已移除），已跳过")
@@ -870,182 +822,109 @@ def _state_active(state: ItemState, now: float) -> bool:
     return state.expires_at is None or state.expires_at > now
 
 
-def _drop_empty_state_levels(group_id: int, user_id: int) -> None:
-    """状态清空后删除成员与群的空层级。"""
-    users = _states.get(group_id)
-    if users is None or users.get(user_id):
-        return
-    users.pop(user_id, None)
-    if not users:
-        _states.pop(group_id, None)
-
-
-def add_state(
+async def add_state(
     group_id: int,
     user_id: int,
     *,
     state: ItemState,
     duration_seconds: float | None = None,
 ) -> None:
-    """为成员新增一件道具状态并落盘（同键旧状态被覆盖）。
+    """为成员新增一件道具状态（同键旧状态被覆盖）。
 
     state 提供状态键、来源道具与附加数据（expires_at 由本函数按下述
     时长计算，传入值不使用）；duration_seconds 为 None 时状态永久
     有效，否则自当前时刻起持续指定秒数。过期状态不在此处清理，
     统一由定时清理分发到期效果（见 purge_expired_states）。
 
-    一次新增多件状态请用 add_states（只落盘一次）。
+    一次新增多件状态请用 add_states。
     """
-    add_states(group_id, user_id, states=[state], duration_seconds=duration_seconds)
+    await add_states(
+        group_id, user_id, states=[state], duration_seconds=duration_seconds
+    )
 
 
-def add_states(
+async def add_states(
     group_id: int,
     user_id: int,
     *,
     states: Sequence[ItemState],
     duration_seconds: float | None = None,
 ) -> None:
-    """批量新增道具状态并只落盘一次（同键旧状态按顺序覆盖）。
+    """批量新增道具状态（同键旧状态按顺序覆盖）。
 
-    时长语义与 add_state 一致（整批共用一个过期时刻）；空序列不落盘。
+    时长语义与 add_state 一致（整批共用一个过期时刻）；空序列不写库。
     """
     if not states:
         return
-    now = time.time()
-    expires_at = None if duration_seconds is None else now + duration_seconds
-    user_states = _states.setdefault(group_id, {}).setdefault(user_id, [])
-    for state in states:
-        user_states[:] = [
-            existing for existing in user_states if existing.key != state.key
-        ]
-        user_states.append(
-            ItemState(
-                key=state.key,
-                item_id=state.item_id,
-                expires_at=expires_at,
-                data=dict(state.data),
-            )
-        )
-    save_states(_states)
+    expires_at = None if duration_seconds is None else time.time() + duration_seconds
+    await upsert_states(group_id, user_id, states, expires_at)
     _bump_state_version()
 
 
-def get_state(group_id: int, user_id: int, key: str) -> ItemState | None:
+async def get_state(group_id: int, user_id: int, key: str) -> ItemState | None:
     """查询成员身上指定键的有效状态，未找到或已过期时返回 None。
 
     已过期的状态不在此处删除：等待定时清理统一分发到期效果
     （见 purge_expired_states）。
     """
-    user_states = _states.get(group_id, {}).get(user_id)
-    if not user_states:
-        return None
-    now = time.time()
-    for state in user_states:
-        if state.key == key and _state_active(state, now):
-            return state
-    return None
+    return await fetch_state(group_id, user_id, key)
 
 
-def remove_state(group_id: int, user_id: int, key: str) -> bool:
-    """移除成员身上指定键的状态并落盘，返回是否存在该状态。"""
-    return remove_states(group_id, user_id, [key]) > 0
+async def remove_state(group_id: int, user_id: int, key: str) -> bool:
+    """移除成员身上指定键的状态，返回是否存在该状态。"""
+    return await remove_states(group_id, user_id, [key]) > 0
 
 
-def set_state_data(group_id: int, user_id: int, key: str, data: dict[str, Any]) -> bool:
-    """覆盖成员身上指定键有效状态的附加数据并落盘（过期时刻保持不变）。
+async def set_state_data(
+    group_id: int, user_id: int, key: str, data: dict[str, Any]
+) -> bool:
+    """覆盖成员身上指定键有效状态的附加数据（过期时刻保持不变）。
 
     供道具模块在状态有效期内更新附加记录（如刷新冷却时刻）；状态不
     存在或已过期时不做任何事并返回 False。
     """
-    state = get_state(group_id, user_id, key)
-    if state is None:
-        return False
-    state.data = dict(data)
-    save_states(_states)
-    _bump_state_version()
-    return True
+    updated = await update_state_data(group_id, user_id, key, data)
+    if updated:
+        _bump_state_version()
+    return updated
 
 
-def remove_states(group_id: int, user_id: int, keys: Sequence[str]) -> int:
-    """批量移除指定键的状态并只落盘一次，返回实际移除的状态数。"""
-    user_states = _states.get(group_id, {}).get(user_id)
-    if not user_states:
-        return 0
-    removing = set(keys)
-    kept = [state for state in user_states if state.key not in removing]
-    removed = len(user_states) - len(kept)
-    if not removed:
-        return 0
-    user_states[:] = kept
-    if not kept:
-        _drop_empty_state_levels(group_id, user_id)
-    save_states(_states)
-    _bump_state_version()
+async def remove_states(group_id: int, user_id: int, keys: Sequence[str]) -> int:
+    """批量移除指定键的状态，返回实际移除的状态数。"""
+    removed = await delete_states(group_id, user_id, keys)
+    if removed:
+        _bump_state_version()
     return removed
 
 
-def list_states(group_id: int, user_id: int) -> list[ItemState]:
+async def list_states(group_id: int, user_id: int) -> list[ItemState]:
     """返回成员身上的全部有效状态（不做清理，过期条目等待定时清理）。"""
-    user_states = _states.get(group_id, {}).get(user_id)
-    if not user_states:
-        return []
     now = time.time()
-    return [state for state in user_states if _state_active(state, now)]
+    states = await load_states(group_id, user_id)
+    return [state for state in states if _state_active(state, now)]
 
 
-def list_state_holders(group_id: int, key: str) -> list[tuple[int, ItemState]]:
+async def list_state_holders(group_id: int, key: str) -> list[tuple[int, ItemState]]:
     """返回群内持有指定键有效状态的成员 (QQ 号, 状态)，按 QQ 号升序。
 
     供道具模块在无使用上下文的场景查询状态持有者（如发送消息时按
     持有者显示名改写文本）；已过期但未清理的状态不计入。
     """
-    users = _states.get(group_id)
-    if not users:
-        return []
-    now = time.time()
-    holders: list[tuple[int, ItemState]] = []
-    for user_id in sorted(users):
-        for state in users[user_id]:
-            if state.key == key and _state_active(state, now):
-                holders.append((user_id, state))
-                break
-    return holders
+    return await select_state_holders(group_id, key)
 
 
-def purge_expired_states() -> list[ItemStateExpireContext]:
-    """清理全部已过期的状态并落盘，返回到期条目列表（无清理时不落盘）。
+async def purge_expired_states() -> list[ItemStateExpireContext]:
+    """清理全部已过期的状态，返回到期条目列表（无清理时不写库）。
 
     返回的条目由主模块按来源道具分发到期回调（见
     ItemBehavior.expire）；未提供回调或处理失败时
     状态仍已被删除。
     """
-    now = time.time()
-    expired: list[ItemStateExpireContext] = []
-    for group_id in list(_states):
-        users = _states[group_id]
-        for user_id in list(users):
-            user_states = users[user_id]
-            kept: list[ItemState] = []
-            for state in user_states:
-                if _state_active(state, now):
-                    kept.append(state)
-                else:
-                    expired.append(
-                        ItemStateExpireContext(
-                            group_id=group_id, user_id=user_id, state=state
-                        )
-                    )
-            if len(kept) == len(user_states):
-                continue
-            if kept:
-                user_states[:] = kept
-            else:
-                users.pop(user_id, None)
-        if not users:
-            _states.pop(group_id, None)
+    expired = [
+        ItemStateExpireContext(group_id=group_id, user_id=user_id, state=state)
+        for group_id, user_id, state in await take_expired_states()
+    ]
     if expired:
-        save_states(_states)
         _bump_state_version()
     return expired
 

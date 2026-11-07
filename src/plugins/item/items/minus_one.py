@@ -14,7 +14,7 @@ from src.plugins.item._framework import (
 
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：决斗分数 -1。"""
-    context.add_score(-1)
+    await context.add_score(-1)
     await context.send("黑色诅咒生效，你的决斗分数-1。")
 
 

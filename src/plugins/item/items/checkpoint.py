@@ -68,11 +68,11 @@ def _state_score(state: ItemState) -> int | None:
     return value
 
 
-def _checkpoints(group_id: int, user_id: int) -> list[tuple[int, int]]:
+async def _checkpoints(group_id: int, user_id: int) -> list[tuple[int, int]]:
     """返回成员全部“存档点”的 (分数, 份数)，按分数从高到低排列。"""
     entries = [
         (score, _state_count(state))
-        for state in list_states(group_id, user_id)
+        for state in await list_states(group_id, user_id)
         if (score := _state_score(state)) is not None
     ]
     entries.sort(key=lambda entry: -entry[0])
@@ -102,12 +102,12 @@ async def _handle_use(context: ItemUseContext) -> None:
     该分数已有“存档点”时只把份数 +1：状态键按分数唯一，份数记在附加
     数据中，状态保持永久有效。
     """
-    score = get_user_score(context.group_id, context.user_id)
+    score = await get_user_score(context.group_id, context.user_id)
     state_key = _state_key(score)
-    existing = get_state(context.group_id, context.user_id, state_key)
+    existing = await get_state(context.group_id, context.user_id, state_key)
     count = _state_count(existing) + 1 if existing is not None else 1
     if existing is None:
-        add_state(
+        await add_state(
             context.group_id,
             context.user_id,
             state=ItemState(
@@ -117,7 +117,7 @@ async def _handle_use(context: ItemUseContext) -> None:
             ),
         )
     else:
-        set_state_data(
+        await set_state_data(
             context.group_id,
             context.user_id,
             state_key,
@@ -147,12 +147,12 @@ checkpoint_cmd = on_command(
 @checkpoint_cmd.handle()
 async def handle_item_checkpoint(bot: Bot, event: GroupMessageEvent) -> None:
     """处理 /item.131.checkpoint 命令：查看自己的全部“存档点”。"""
-    entries = _checkpoints(event.group_id, event.user_id)
+    entries = await _checkpoints(event.group_id, event.user_id)
     if not entries:
         # 不具有“存档点”状态：静默失败
         return
     name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
-    current = get_user_score(event.group_id, event.user_id)
+    current = await get_user_score(event.group_id, event.user_id)
     lines = [f"{name} 的存档点："]
     lines.extend(f"决斗分数 {score} ×{count}" for score, count in entries)
     lines.append(f"当前决斗分数：{current}")
@@ -170,7 +170,7 @@ async def handle_item_load(
     bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
 ) -> None:
     """处理 /item.131.load 命令：恢复决斗分数并使该“存档点”份数 -1。"""
-    if not _checkpoints(event.group_id, event.user_id):
+    if not await _checkpoints(event.group_id, event.user_id):
         # 不具有“存档点”状态：静默失败
         return
     tokens = args.extract_plain_text().split()
@@ -181,7 +181,7 @@ async def handle_item_load(
         )
         return
     state_key = _state_key(score)
-    state = get_state(event.group_id, event.user_id, state_key)
+    state = await get_state(event.group_id, event.user_id, state_key)
     if state is None:
         await send_group_text(
             bot,
@@ -192,20 +192,20 @@ async def handle_item_load(
         )
         return
     name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
-    before = get_user_score(event.group_id, event.user_id)
+    before = await get_user_score(event.group_id, event.user_id)
     remaining = _state_count(state) - 1
     # 同步段：结算分数并把该存档点的份数 -1（归零时该存档点消失）
-    add_user_score(event.group_id, event.user_id, name, score - before)
+    await add_user_score(event.group_id, event.user_id, name, score - before)
     if remaining > 0:
-        set_state_data(
+        await set_state_data(
             event.group_id,
             event.user_id,
             state_key,
             {_SCORE_KEY: score, _COUNT_KEY: remaining},
         )
     else:
-        remove_state(event.group_id, event.user_id, state_key)
-    after = get_user_score(event.group_id, event.user_id)
+        await remove_state(event.group_id, event.user_id, state_key)
+    after = await get_user_score(event.group_id, event.user_id)
     if after == before:
         detail = f"决斗分数没有变化（仍为 {before}）"
     else:

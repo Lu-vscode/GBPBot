@@ -77,7 +77,7 @@ class _DuelProvokeService(DuelProvokeService):
         await fire_duel_event(
             make_duel_event(duel, DuelEventKind.ACCEPTED, actor_id=duel.opponent_id)
         )
-        return snapshot(duel)
+        return await snapshot(duel)
 
     async def send_provoked_gesture(
         self, bot: Bot, group_id: int, challenger_id: int, opponent_id: int
@@ -151,7 +151,7 @@ class _DuelCancelService(DuelCancelService):
             f"的决斗（点数 {duel.multiplier}）被取消"
         )
         await fire_duel_event(make_duel_event(duel, DuelEventKind.CANCELED))
-        return snapshot(duel)
+        return await snapshot(duel)
 
 
 class _DuelGestureService(DuelGestureService):

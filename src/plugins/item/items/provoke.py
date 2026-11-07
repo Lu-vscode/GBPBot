@@ -37,9 +37,9 @@ _NO_PENDING_DUEL = "你没有向该成员发起等待对方接受的决斗。"
 _PROVOKE_FAILED = "挑衅失败：该决斗已不在进行中，道具已退还。"
 
 
-def _find_pending_target(context: ItemUseContext) -> DuelSnapshot | None:
+async def _find_pending_target(context: ItemUseContext) -> DuelSnapshot | None:
     """查找使用者向目标成员发起、等待对方接受的决斗快照。"""
-    for snapshot in _state_service.list_duels(context.group_id):
+    for snapshot in await _state_service.list_duels(context.group_id):
         if (
             snapshot.challenger_id == context.user_id
             and snapshot.opponent_id == context.target_id
@@ -49,13 +49,13 @@ def _find_pending_target(context: ItemUseContext) -> DuelSnapshot | None:
     return None
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：@ 参数与待接受的决斗；返回错误文案时本次不消耗。"""
     if context.args or context.target_id is None:
         return _USAGE
     if context.target_id == context.user_id:
         return f"不能对自己使用 {context.item.label}。"
-    if _find_pending_target(context) is None:
+    if await _find_pending_target(context) is None:
         return _NO_PENDING_DUEL
     return None
 
@@ -70,12 +70,12 @@ async def _handle_use(context: ItemUseContext) -> None:
         context.group_id, context.user_id, target_id
     )
     if snapshot is None:
-        # 不可达：can_use 与消耗同处同步段，决斗状态不会在期间改变
+        # 不可达：check 与消耗在同一把群锁内，决斗状态不会在期间改变
         logger.error(
             f"挑衅：消耗后的强制接受未成功（群 {context.group_id}，"
             f"{context.user_id} 与 {target_id}）"
         )
-        add_item(context.group_id, context.user_id, context.item.item_id)
+        await add_item(context.group_id, context.user_id, context.item.item_id)
         await context.send(_PROVOKE_FAILED)
         return
     opponent_name = snapshot.opponent_name

@@ -54,25 +54,25 @@ _EFFECT_PRIORITY = Quality.BLUE
 _gesture_service = require_service(DuelGestureService)
 
 
-def _has_luck(group_id: int, user_id: int) -> bool:
+async def _has_luck(group_id: int, user_id: int) -> bool:
     """判断成员是否持有有效的“强运”状态。"""
-    return get_state(group_id, user_id, _STATE_KEY) is not None
+    return await get_state(group_id, user_id, _STATE_KEY) is not None
 
 
-def _required_gestures(group_id: int, user_id: int, _opponent_id: int) -> int:
+async def _required_gestures(group_id: int, user_id: int, _opponent_id: int) -> int:
     """所需手势提供者：持有“强运”时需发送 3 个猜拳表情。
 
     双方都持有“强运”时各自同样发送 3 个并按接收顺序一一对应判定
     （见 _clash_outcome），所需数量与对手是否持有没有关系。
     """
-    if _has_luck(group_id, user_id):
+    if await _has_luck(group_id, user_id):
         return _GESTURE_COUNT
     return 1
 
 
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：获得持续 3 小时的“强运”状态并发送提示。"""
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(key=_STATE_KEY, item_id=_ITEM_ID),
@@ -104,7 +104,7 @@ def _winner_of(
     return None
 
 
-def _clash_outcome(
+async def _clash_outcome(
     context: DuelGestureContext,
     challenger: DuelGestureSide,
     opponent: DuelGestureSide,
@@ -117,11 +117,13 @@ def _clash_outcome(
     不一致（动态时序异常）时按较短一方截断配对。
     """
     outcomes = [
-        context.pair_outcome(
-            challenger.user_id,
-            challenger_gesture,
-            opponent.user_id,
-            opponent_gesture,
+        (
+            await context.pair_outcome(
+                challenger.user_id,
+                challenger_gesture,
+                opponent.user_id,
+                opponent_gesture,
+            )
         ).outcome
         for challenger_gesture, opponent_gesture in zip(
             challenger.gestures, opponent.gestures, strict=False
@@ -134,7 +136,7 @@ def _clash_outcome(
     return 1 if challenger_won else -1
 
 
-def _aggregate(
+async def _aggregate(
     context: DuelGestureContext, multi: DuelGestureSide, single: DuelGestureSide
 ) -> int:
     """逐表情聚合强运方的判定：1 强运方胜、0 平局、-1 强运方负。
@@ -143,8 +145,10 @@ def _aggregate(
     否则至少一个平则平；否则负。
     """
     results = [
-        context.pair_outcome(
-            multi.user_id, gesture, single.user_id, single.gestures[0]
+        (
+            await context.pair_outcome(
+                multi.user_id, gesture, single.user_id, single.gestures[0]
+            )
         ).outcome
         for gesture in multi.gestures
     ]
@@ -155,7 +159,7 @@ def _aggregate(
     return -1
 
 
-def _judge(context: DuelGestureContext) -> DuelGestureVerdict | None:
+async def _judge(context: DuelGestureContext) -> DuelGestureVerdict | None:
     """整局判定效果：任一方持有“强运”时按强运规则裁决本场胜负。
 
     双方都持有“强运”时按接收顺序一一对应判定（见 _clash_outcome）；
@@ -165,10 +169,10 @@ def _judge(context: DuelGestureContext) -> DuelGestureVerdict | None:
     """
     challenger = context.challenger
     opponent = context.opponent
-    challenger_luck = _has_luck(context.group_id, challenger.user_id)
-    opponent_luck = _has_luck(context.group_id, opponent.user_id)
+    challenger_luck = await _has_luck(context.group_id, challenger.user_id)
+    opponent_luck = await _has_luck(context.group_id, opponent.user_id)
     if challenger_luck and opponent_luck:
-        outcome = _clash_outcome(context, challenger, opponent)
+        outcome = await _clash_outcome(context, challenger, opponent)
         return DuelGestureVerdict(
             winner_id=_winner_of(outcome, challenger, opponent),
             detail=_CLASH_PREFIX,
@@ -179,9 +183,9 @@ def _judge(context: DuelGestureContext) -> DuelGestureVerdict | None:
         multi, single = opponent, challenger
     else:
         return None
-    if not _has_luck(context.group_id, multi.user_id):
+    if not await _has_luck(context.group_id, multi.user_id):
         return None
-    outcome = _aggregate(context, multi, single)
+    outcome = await _aggregate(context, multi, single)
     return DuelGestureVerdict(
         winner_id=_winner_of(outcome, multi, single),
         detail=_used_prefix(multi.name),

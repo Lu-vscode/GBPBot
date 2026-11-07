@@ -63,30 +63,32 @@ _SCALE_FAILED = "使用失败：该决斗已不在进行中，道具已退还。
 _multiply_usages: set[tuple[int, int, int]] = set()
 
 
-def _find_duel(group_id: int, user_id: int, target_id: int) -> DuelSnapshot | None:
+async def _find_duel(
+    group_id: int, user_id: int, target_id: int
+) -> DuelSnapshot | None:
     """查找双方之间进行中的决斗快照（不限发起方向与是否已接受）。"""
-    for snapshot in _state_service.list_duels(group_id):
+    for snapshot in await _state_service.list_duels(group_id):
         if {snapshot.challenger_id, snapshot.opponent_id} == {user_id, target_id}:
             return snapshot
     return None
 
 
-def _usage_error(context: ItemUseContext) -> str | None:
+async def _usage_error(context: ItemUseContext) -> str | None:
     """使用前共用校验：@ 参数与双方之间进行中的决斗；
     返回错误文案时本次不消耗。"""
     if context.args or context.target_id is None:
         return f"请 @ 一位群成员，用法：/item.use {context.item.item_id} @群成员"
     if context.target_id == context.user_id:
         return f"不能对自己使用 {context.item.label}。"
-    if _find_duel(context.group_id, context.user_id, context.target_id) is None:
+    if await _find_duel(context.group_id, context.user_id, context.target_id) is None:
         return _NO_DUEL
     return None
 
 
-def _can_use_multiply(context: ItemUseContext) -> str | None:
+async def _can_use_multiply(context: ItemUseContext) -> str | None:
     """倍加类道具的使用前校验：共用校验与「该场决斗未使用过」；
     返回错误文案时本次不消耗。"""
-    error = _usage_error(context)
+    error = await _usage_error(context)
     if error is not None:
         return error
     target_id = context.target_id
@@ -117,9 +119,9 @@ async def _handle_use(context: ItemUseContext) -> None:
     if target_id is None:
         # 不可达：can_use 已校验参数与目标存在
         return
-    snapshot = _find_duel(context.group_id, context.user_id, target_id)
+    snapshot = await _find_duel(context.group_id, context.user_id, target_id)
     if snapshot is None:
-        # 不可达：can_use 与消耗同处同步段，决斗状态不会在期间改变
+        # 不可达：check 与消耗在同一把群锁内，决斗状态不会在期间改变
         await _refund(context)
         return
     numerator, denominator, scale_text = _SCALES[context.item.item_id]
@@ -152,7 +154,7 @@ async def _refund(context: ItemUseContext) -> None:
         f"{context.item.label}：消耗后点数缩放未生效，道具已退还"
         f"（群 {context.group_id}，成员 {context.user_id}）"
     )
-    add_item(context.group_id, context.user_id, context.item.item_id)
+    await add_item(context.group_id, context.user_id, context.item.item_id)
     await context.send(_SCALE_FAILED)
 
 

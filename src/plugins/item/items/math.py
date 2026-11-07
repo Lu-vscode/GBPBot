@@ -106,11 +106,11 @@ def _state_name(data: dict[str, Any], user_id: int) -> str:
     return truncate_name(raw, _NICKNAME_MAX_LENGTH)
 
 
-def _zero_score(group_id: int, user_id: int, name: str) -> None:
+async def _zero_score(group_id: int, user_id: int, name: str) -> None:
     """把成员的决斗分数严格归零（正负分都设为 0，已是 0 时不动）。"""
-    current = get_user_score(group_id, user_id)
+    current = await get_user_score(group_id, user_id)
     if current != 0:
-        add_user_score(group_id, user_id, name, -current)
+        await add_user_score(group_id, user_id, name, -current)
 
 
 async def _handle_use(context: ItemUseContext) -> None:
@@ -120,7 +120,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     用户马上作答也能被正常受理。
     """
     statement, answer = random.choice(_PROBLEMS)
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(
@@ -151,14 +151,14 @@ async def handle_item_math_answer(
     bot: Bot, event: GroupMessageEvent, args: Message = CommandArg()
 ) -> None:
     """处理 /item.250.answer 命令：回答进行中的数学难题。"""
-    state = get_state(event.group_id, event.user_id, _STATE_KEY)
+    state = await get_state(event.group_id, event.user_id, _STATE_KEY)
     if state is None:
         # 没有进行中的挑战：静默忽略
         return
     data = state.data
     name = _state_name(data, event.user_id)
     # 同步段：先删除状态再判定与结算，避免并发指令重复回答
-    remove_state(event.group_id, event.user_id, _STATE_KEY)
+    await remove_state(event.group_id, event.user_id, _STATE_KEY)
     answer = data.get("answer")
     correct = (
         isinstance(answer, int)
@@ -177,7 +177,7 @@ async def handle_item_math_answer(
             )
             return
         # 先发放奖品再发送文案：文案发送失败也不影响成员获得道具
-        add_item(event.group_id, event.user_id, _WATCH_ITEM_ID)
+        await add_item(event.group_id, event.user_id, _WATCH_ITEM_ID)
         await send_group_text(
             bot,
             event.group_id,
@@ -186,7 +186,7 @@ async def handle_item_math_answer(
             label="道具消息",
         )
         return
-    _zero_score(event.group_id, event.user_id, name)
+    await _zero_score(event.group_id, event.user_id, name)
     await send_group_text(
         bot,
         event.group_id,
@@ -204,7 +204,7 @@ async def _handle_state_expire(context: ItemStateExpireContext) -> None:
     """
     data = context.state.data
     name = _state_name(data, context.user_id)
-    _zero_score(context.group_id, context.user_id, name)
+    await _zero_score(context.group_id, context.user_id, name)
     bot_id = str(data.get("bot_self_id") or "")
     bot = get_bots().get(bot_id)
     if not isinstance(bot, Bot):

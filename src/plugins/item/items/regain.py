@@ -124,9 +124,9 @@ def _in_cooldown(state: ItemState, now: float) -> bool:
     return float(ready_at) > now
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：不得处于「复得」状态，且天数参数合法。"""
-    if get_state(context.group_id, context.user_id, _STATE_KEY) is not None:
+    if await get_state(context.group_id, context.user_id, _STATE_KEY) is not None:
         return f"你正处于“复得”状态，无法再次使用 {context.item.label}。"
     if len(context.args) != 1:
         return _usage(context)
@@ -143,7 +143,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     days = _parse_days(context.args[0]) if len(context.args) == 1 else None
     if days is None:  # 不可达：can_use 已校验参数
         return
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(key=_STATE_KEY, item_id=_ITEM_ID, data={_DAYS_KEY: days}),
@@ -171,7 +171,7 @@ async def _trigger(
             "本次不发放道具也不进入冷却"
         )
         return
-    set_state_data(
+    await set_state_data(
         context.group_id,
         context.user_id,
         _STATE_KEY,
@@ -190,7 +190,7 @@ async def _trigger(
             context.bot, context.group_id, context.user_id, context.user_name, item
         )
         return
-    add_item(context.group_id, context.user_id, item.item_id)
+    await add_item(context.group_id, context.user_id, item.item_id)
     await context.send(
         f"{context.user_name} 的“复得”如约而至，"
         f"获得道具 {item.label}【{quality_label(item.quality)}】。"
@@ -210,7 +210,7 @@ async def _on_item_used(context: ItemUseContext) -> None:
         return
     if has_tag(context.item.item_id, ItemTag.COPY):
         return
-    state = get_state(context.group_id, context.user_id, _STATE_KEY)
+    state = await get_state(context.group_id, context.user_id, _STATE_KEY)
     if state is None or not _active_now():
         return
     days = _state_days(state)

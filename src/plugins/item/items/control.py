@@ -67,7 +67,7 @@ class _InnerUse:
     """被使用道具自身的 @ 目标（道具编号之后的第一个 @，未 @ 时为 None）。"""
 
 
-def _unusable_error(
+async def _unusable_error(
     context: ItemUseContext,
     target_id: int,
     definition: ItemDefinition,
@@ -80,14 +80,14 @@ def _unusable_error(
             f"无法驱使对方使用 {definition.label}：只能驱使对方使用品质不高于"
             f"{quality_label(_MAX_QUALITY)}的道具。"
         )
-    if get_item_count(context.group_id, target_id, definition.item_id) < 1:
+    if await get_item_count(context.group_id, target_id, definition.item_id) < 1:
         return f"对方未拥有道具 {definition.label}。"
     if use_args and not definition.accepts_args:
         return f"{definition.label} 不接受其它参数。"
     return None
 
 
-def _parse_inner_use(context: ItemUseContext) -> _InnerUse | str:
+async def _parse_inner_use(context: ItemUseContext) -> _InnerUse | str:
     """解析被代替使用的成员与道具，返回解析结果或错误文案。
 
     同步校验 @ 参数、道具编号与使用要求；被使用道具自身的使用条件
@@ -103,7 +103,7 @@ def _parse_inner_use(context: ItemUseContext) -> _InnerUse | str:
     if definition is None:
         return f"道具 {item_id} 不存在。"
     use_args = context.args[1:]
-    error = _unusable_error(context, target_id, definition, use_args)
+    error = await _unusable_error(context, target_id, definition, use_args)
     if error is not None:
         return error
     return _InnerUse(
@@ -114,9 +114,9 @@ def _parse_inner_use(context: ItemUseContext) -> _InnerUse | str:
     )
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：@ 成员与被使用道具及其参数；返回错误文案时本次不消耗。"""
-    parsed = _parse_inner_use(context)
+    parsed = await _parse_inner_use(context)
     if isinstance(parsed, str):
         return parsed
     return None
@@ -125,14 +125,14 @@ def _can_use(context: ItemUseContext) -> str | None:
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：以被 @ 成员的身份使用其道具（消耗其该道具并按原样
     执行使用效果）。"""
-    parsed = _parse_inner_use(context)
+    parsed = await _parse_inner_use(context)
     if isinstance(parsed, str):
         # 不可达：can_use 与消耗同处同步段，道具状态不会在期间改变
         logger.error(
             f"夺心魄：消耗后的参数解析未通过（{parsed}）"
             f"（群 {context.group_id}，成员 {context.user_id}）"
         )
-        add_item(context.group_id, context.user_id, _ITEM_ID)
+        await add_item(context.group_id, context.user_id, _ITEM_ID)
         await context.send(_STALE_FAILED)
         return
     target_name = await member_display_name(
@@ -159,7 +159,7 @@ async def _handle_use(context: ItemUseContext) -> None:
                 f"（群 {context.group_id}，成员 {context.user_id} ->"
                 f" {parsed.user_id}）"
             )
-            add_item(context.group_id, context.user_id, _ITEM_ID)
+            await add_item(context.group_id, context.user_id, _ITEM_ID)
             await context.send(
                 f"{target_name} 无法使用 {inner.item.label}：{error}\n"
                 f"{context.item.label} 已退还。"
@@ -171,7 +171,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     )
     if not await run_item_use(inner):
         # 不可达：can_use 与消耗同处同步段，道具状态不会在期间改变
-        add_item(context.group_id, context.user_id, _ITEM_ID)
+        await add_item(context.group_id, context.user_id, _ITEM_ID)
         await context.send(_STALE_FAILED)
 
 

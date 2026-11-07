@@ -41,9 +41,9 @@ def _layers_of(state: ItemState | None) -> int:
 
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：获得 1 层永久状态「+1」并发送提示。"""
-    state = get_state(context.group_id, context.user_id, _STATE_KEY)
+    state = await get_state(context.group_id, context.user_id, _STATE_KEY)
     layers = _layers_of(state) + 1
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(key=_STATE_KEY, item_id=_ITEM_ID, data={_LAYERS_KEY: layers}),
@@ -62,9 +62,9 @@ async def _handle_use(context: ItemUseContext) -> None:
     )
 
 
-def _sign_bonus(group_id: int, user_id: int) -> int:
+async def _sign_bonus(group_id: int, user_id: int) -> int:
     """签到分数加成：每层「+1」为签到获得的决斗分数+1。"""
-    return _layers_of(get_state(group_id, user_id, _STATE_KEY))
+    return _layers_of(await get_state(group_id, user_id, _STATE_KEY))
 
 
 set_sign_bonus_provider(_ITEM_ID, _sign_bonus)

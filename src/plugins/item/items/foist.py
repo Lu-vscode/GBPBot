@@ -49,14 +49,14 @@ def _target_error(context: ItemUseContext, target_id: int) -> str | None:
     return None
 
 
-def _item_error(context: ItemUseContext, item_id: str) -> str | None:
+async def _item_error(context: ItemUseContext, item_id: str) -> str | None:
     """校验要强塞的道具：存在、自己拥有、可强塞的品质；返回错误文案或 None。"""
     if item_id == _ITEM_ID:
         return f"不能强塞 {context.item.label} 本身。"
     target = get_item(item_id)
     if target is None:
         return f"道具 {item_id} 不存在。"
-    if get_item_count(context.group_id, context.user_id, item_id) < 1:
+    if await get_item_count(context.group_id, context.user_id, item_id) < 1:
         return f"你未拥有道具 {target.label}。"
     if target.quality is Quality.BLACK_CURSE:
         return "黑色诅咒无法强塞。"
@@ -68,7 +68,7 @@ def _item_error(context: ItemUseContext, item_id: str) -> str | None:
     return None
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：@ 对象与要强塞的道具；返回错误文案时本次不消耗。"""
     target_id = context.target_id
     if target_id is None or len(context.args) != 1 or not is_item_id(context.args[0]):
@@ -76,7 +76,7 @@ def _can_use(context: ItemUseContext) -> str | None:
     error = _target_error(context, target_id)
     if error is not None:
         return error
-    return _item_error(context, context.args[0])
+    return await _item_error(context, context.args[0])
 
 
 async def _handle_use(context: ItemUseContext) -> None:
@@ -87,18 +87,18 @@ async def _handle_use(context: ItemUseContext) -> None:
     target = get_item(context.args[0])
     if target is None:  # 不可达：can_use 已校验目标道具存在
         return
-    if not remove_item(context.group_id, context.user_id, target.item_id):
+    if not await remove_item(context.group_id, context.user_id, target.item_id):
         # 不可达：校验、消耗与效果同处同步段，库存不会在此期间改变
         logger.error(
             f"强塞：道具 {target.label} 未能从库存移除，{context.item.label} 已退还"
             f"（群 {context.group_id}，成员 {context.user_id}）"
         )
-        add_item(context.group_id, context.user_id, _ITEM_ID)
+        await add_item(context.group_id, context.user_id, _ITEM_ID)
         await context.send(f"使用失败：道具状态异常，{context.item.label} 已退还。")
         return
-    add_item(context.group_id, target_id, target.item_id)
+    await add_item(context.group_id, target_id, target.item_id)
     # 耐久型道具的耗损副本带着剩余耐久一并转移（非耐久型返回 None）
-    remaining = move_damaged_instance(
+    remaining = await move_damaged_instance(
         context.group_id, context.user_id, target_id, target.item_id
     )
     target_name = await member_display_name(

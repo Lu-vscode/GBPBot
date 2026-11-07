@@ -53,7 +53,7 @@ _event_service = require_service(DuelEventService)
 
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：登记持续 1 天的衔尾蛇状态并发送提示。"""
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(key=_STATE_KEY, item_id=_ITEM_ID),
@@ -98,7 +98,7 @@ def _find_exchange_target(
     return None
 
 
-def _exchange_after_settled(
+async def _exchange_after_settled(
     group_id: int, user_id: int, user_name: str, *, forward: bool
 ) -> str | None:
     """结算完成后为持有衔尾蛇状态的成员执行一次分数交换。
@@ -106,16 +106,18 @@ def _exchange_after_settled(
     未持有状态或没有可交换的成员时返回 None；否则交换双方分数并
     返回结算文案。
     """
-    if get_state(group_id, user_id, _STATE_KEY) is None:
+    if await get_state(group_id, user_id, _STATE_KEY) is None:
         return None
-    target = _find_exchange_target(get_rank_entries(group_id), user_id, forward=forward)
+    target = _find_exchange_target(
+        await get_rank_entries(group_id), user_id, forward=forward
+    )
     if target is None:
         return None
     target_id, target_name, _ = target
-    own_score = get_user_score(group_id, user_id)
-    target_score = get_user_score(group_id, target_id)
-    add_user_score(group_id, target_id, target_name, own_score - target_score)
-    add_user_score(group_id, user_id, user_name, target_score - own_score)
+    own_score = await get_user_score(group_id, user_id)
+    target_score = await get_user_score(group_id, target_id)
+    await add_user_score(group_id, target_id, target_name, own_score - target_score)
+    await add_user_score(group_id, user_id, user_name, target_score - own_score)
     return (
         f"{user_name} 的衔尾蛇在排行榜中游走，"
         f"与 {target_name} 交换了决斗分数。\n\n"
@@ -151,7 +153,7 @@ async def _on_duel_event(event: DuelEvent) -> None:
         (event.winner_id, winner_name, True),
         (event.loser_id, loser_name, False),
     ):
-        text = _exchange_after_settled(
+        text = await _exchange_after_settled(
             event.group_id, user_id, user_name, forward=forward
         )
         if text is not None:

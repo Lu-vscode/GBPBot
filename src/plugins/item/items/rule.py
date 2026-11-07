@@ -261,7 +261,7 @@ def _prepare_update(context: ItemUseContext) -> _EnvUpdate | str:
     return _EnvUpdate(path=path, text=new_text, summary=change.summary)
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：参数、可行性与配置文件预检；返回错误文案时不消耗。"""
     result = _prepare_update(context)
     if isinstance(result, str):
@@ -302,14 +302,14 @@ async def _handle_use(context: ItemUseContext) -> None:
     if isinstance(prepared, str):
         # 不可达：can_use 已预检通过（配置文件在两次读取之间被外部改动时兜底）
         logger.error(f"篡天：消耗后的预检未通过（{prepared}）")
-        add_item(context.group_id, context.user_id, context.item.item_id)
+        await add_item(context.group_id, context.user_id, context.item.item_id)
         await context.send(_ENV_WRITE_ERROR)
         return
     try:
         _write_env_text(prepared.path, prepared.text)
     except _ENV_FILE_ERRORS as exc:
         logger.error(f"篡天：写入配置文件失败（{prepared.path.resolve()}）：{exc!r}")
-        add_item(context.group_id, context.user_id, context.item.item_id)
+        await add_item(context.group_id, context.user_id, context.item.item_id)
         await context.send(_ENV_WRITE_ERROR)
         return
     await context.send(

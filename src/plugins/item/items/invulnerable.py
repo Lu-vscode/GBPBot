@@ -41,28 +41,28 @@ _DURATION_SECONDS = 3600.0
 _intercept_service = require_service(DuelScoreInterceptService)
 
 
-def _active_states(group_id: int, user_id: int) -> list[ItemState]:
+async def _active_states(group_id: int, user_id: int) -> list[ItemState]:
     """返回成员持有的全部有效「无懈可击」状态（按到期时间升序）。
 
     expires_at 为 None（异常数据）的条目排在最前，优先被消耗。
     """
     states = [
         state
-        for state in list_states(group_id, user_id)
+        for state in await list_states(group_id, user_id)
         if state.key.startswith(_STATE_KEY_PREFIX)
     ]
     states.sort(key=lambda state: state.expires_at or 0.0)
     return states
 
 
-def _next_state_key(group_id: int, user_id: int) -> str:
+async def _next_state_key(group_id: int, user_id: int) -> str:
     """为新的一份状态生成状态键（在现存有效状态的序号中取最小可用值）。
 
     已过期但未清理的状态可能占用同序号键；add_state 添加同键状态时
     会覆盖旧条目，序号仍可复用。
     """
     used: set[int] = set()
-    for state in _active_states(group_id, user_id):
+    for state in await _active_states(group_id, user_id):
         suffix = state.key[len(_STATE_KEY_PREFIX) :]
         if suffix.isdigit():
             used.add(int(suffix))
@@ -74,11 +74,11 @@ def _next_state_key(group_id: int, user_id: int) -> str:
 
 async def _handle_use(context: ItemUseContext) -> None:
     """使用效果：登记一份持续 1 小时的「无懈可击」状态并发送提示。"""
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(
-            key=_next_state_key(context.group_id, context.user_id),
+            key=await _next_state_key(context.group_id, context.user_id),
             item_id=_ITEM_ID,
         ),
         duration_seconds=_DURATION_SECONDS,
@@ -126,7 +126,9 @@ def _schedule_notice(group_id: int, text: str) -> None:
     task.add_done_callback(_on_notice_task_done)
 
 
-def _intercept_score_change(group_id: int, user_id: int, name: str, delta: int) -> int:
+async def _intercept_score_change(
+    group_id: int, user_id: int, name: str, delta: int
+) -> int:
     """分数改变拦截：抵消一次变化并消耗一份「无懈可击」状态。
 
     在分数写入的同步段内调用：持有状态时消耗最早到期的一份、登记抵消
@@ -134,10 +136,10 @@ def _intercept_score_change(group_id: int, user_id: int, name: str, delta: int) 
     """
     if delta == 0:
         return delta
-    states = _active_states(group_id, user_id)
+    states = await _active_states(group_id, user_id)
     if not states:
         return delta
-    remove_state(group_id, user_id, states[0].key)
+    await remove_state(group_id, user_id, states[0].key)
     logger.info(
         f"群 {group_id} 成员 {user_id} 的「无懈可击」生效，"
         f"抵消了一次 {delta:+d} 的决斗分数改变"

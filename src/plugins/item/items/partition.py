@@ -66,7 +66,7 @@ def _state_target_name(state: ItemState, target_id: int) -> str:
     return truncate_name(raw, _NICKNAME_MAX_LENGTH)
 
 
-def _can_use(context: ItemUseContext) -> str | None:
+async def _can_use(context: ItemUseContext) -> str | None:
     """使用前校验：@ 一位成员（可以 @ 自己）且双方均未处于「隔断」
     状态；返回错误文案时本次不消耗。"""
     target_id = context.target_id
@@ -74,10 +74,10 @@ def _can_use(context: ItemUseContext) -> str | None:
         return _USAGE
     if target_id in get_bot_list() or context.bot.self_id == str(target_id):
         return f"不能对机器人使用 {context.item.label}。"
-    if get_state(context.group_id, context.user_id, _STATE_KEY) is not None:
+    if await get_state(context.group_id, context.user_id, _STATE_KEY) is not None:
         return _SELF_STATE
     if target_id != context.user_id and (
-        get_state(context.group_id, target_id, _STATE_KEY) is not None
+        await get_state(context.group_id, target_id, _STATE_KEY) is not None
     ):
         return _TARGET_STATE
     return None
@@ -97,7 +97,7 @@ async def _handle_use(context: ItemUseContext) -> None:
         target_name = await member_display_name(
             context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
         )
-    add_state(
+    await add_state(
         context.group_id,
         context.user_id,
         state=ItemState(
@@ -114,7 +114,7 @@ async def _handle_use(context: ItemUseContext) -> None:
             "1 小时内，无法向任何人发起决斗，也不会被任何人发起决斗。"
         )
         return
-    add_state(
+    await add_state(
         context.group_id,
         target_id,
         state=ItemState(
@@ -161,12 +161,12 @@ async def _on_duel_event(event: DuelEvent) -> None:
     if event.kind is not DuelEventKind.CHALLENGE:
         return
     lines: list[str] = []
-    challenger_state = get_state(event.group_id, event.challenger_id, _STATE_KEY)
+    challenger_state = await get_state(event.group_id, event.challenger_id, _STATE_KEY)
     if challenger_state is not None:
         text = _challenger_block_text(event, challenger_state)
         if text is not None:
             lines.append(text)
-    opponent_state = get_state(event.group_id, event.opponent_id, _STATE_KEY)
+    opponent_state = await get_state(event.group_id, event.opponent_id, _STATE_KEY)
     if opponent_state is not None:
         text = _opponent_block_text(event, opponent_state)
         if text is not None:

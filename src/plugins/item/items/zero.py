@@ -68,11 +68,11 @@ _NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 # _framework.state_label），未声明的回退为道具名称
 
 
-def _set_score(group_id: int, user_id: int, name: str, score: int) -> None:
+async def _set_score(group_id: int, user_id: int, name: str, score: int) -> None:
     """把成员的决斗分数设为指定值（无变化时不重复写盘）。"""
-    current = get_user_score(group_id, user_id)
+    current = await get_user_score(group_id, user_id)
     if current != score:
-        add_user_score(group_id, user_id, name, score - current)
+        await add_user_score(group_id, user_id, name, score - current)
 
 
 def _state_label(state: ItemState) -> str:
@@ -106,7 +106,7 @@ def _format_remaining(seconds: float) -> str:
     return f"{minute}分钟"
 
 
-def _remove_former_holders(group_id: int, user_id: int) -> list[tuple[int, str]]:
+async def _remove_former_holders(group_id: int, user_id: int) -> list[tuple[int, str]]:
     """移除群内其它成员身上的「归零」与「新生」状态，返回 (QQ 号, 群昵称)。
 
     昵称取状态登记时保存的快照（缺失时回退为 QQ 号）；两个状态键的
@@ -114,14 +114,14 @@ def _remove_former_holders(group_id: int, user_id: int) -> list[tuple[int, str]]
     """
     former: dict[int, str] = {}
     for key in _OWN_STATE_KEYS:
-        for holder_id, state in list_state_holders(group_id, key):
+        for holder_id, state in await list_state_holders(group_id, key):
             if holder_id == user_id:
                 # 不可达：使用者自己的状态已在清空步骤移除
                 continue
             name = str(state.data.get("user_name") or "").strip()
             former[holder_id] = name or f"QQ {holder_id}"
     for holder_id in former:
-        remove_states(group_id, holder_id, list(_OWN_STATE_KEYS))
+        await remove_states(group_id, holder_id, list(_OWN_STATE_KEYS))
     return list(former.items())
 
 
@@ -136,30 +136,32 @@ async def _handle_use(context: ItemUseContext) -> None:
     user_name = context.user_name
 
     # 同步段一：清空使用者的道具与全部有效状态，并快照文案信息
-    lost_items = list_user_items(group_id, user_id)
-    remove_items(
+    lost_items = await list_user_items(group_id, user_id)
+    await remove_items(
         group_id,
         user_id,
         [(definition.item_id, count) for definition, count in lost_items],
     )
-    lost_states = list_states(group_id, user_id)
-    remove_states(group_id, user_id, [state.key for state in lost_states])
+    lost_states = await list_states(group_id, user_id)
+    await remove_states(group_id, user_id, [state.key for state in lost_states])
     lost_state_labels = [
         _state_label(state) for state in lost_states if state.key not in _OWN_STATE_KEYS
     ]
 
     # 同步段二：把「归零」与「新生」从旧持有者手中收回（状态转移）
-    former_holders = _remove_former_holders(group_id, user_id)
+    former_holders = await _remove_former_holders(group_id, user_id)
 
     # 同步段三：自己获得「归零」与「新生」（冷却记录为空，即时可用）
-    add_states(
+    await add_states(
         group_id,
         user_id,
         states=[_new_state(key, user_name) for key in _OWN_STATE_KEYS],
     )
 
     # 同步段四：自己与随机抽选的其它成员决斗分数归零（批量写盘一次）
-    candidates = [entry for entry in get_rank_entries(group_id) if entry[0] != user_id]
+    candidates = [
+        entry for entry in await get_rank_entries(group_id) if entry[0] != user_id
+    ]
     picked = (
         random.sample(candidates, _OTHER_LIMIT)
         if len(candidates) > _OTHER_LIMIT
@@ -168,10 +170,10 @@ async def _handle_use(context: ItemUseContext) -> None:
     targets = [(user_id, user_name), *((entry[0], entry[1]) for entry in picked)]
     score_changes: list[tuple[int, str, int]] = []
     for target_id, target_name in targets:
-        current = get_user_score(group_id, target_id)
+        current = await get_user_score(group_id, target_id)
         if current:
             score_changes.append((target_id, target_name, -current))
-    add_user_scores(group_id, score_changes)
+    await add_user_scores(group_id, score_changes)
 
     # 常规使用消息（引用触发指令），列表为空的段落不显示
     names = "、".join([user_name, *(name for _, name, _ in picked)])
@@ -200,7 +202,7 @@ zero_cmd = on_command(f"item.{_ITEM_ID}.zero", rule=is_type(GroupMessageEvent))
 @zero_cmd.handle()
 async def handle_item_zero(bot: Bot, event: GroupMessageEvent) -> None:
     """处理 /item.000.zero 命令：将自己的决斗分数设为 0（冷却 1 天）。"""
-    state = get_state(event.group_id, event.user_id, _ZERO_STATE_KEY)
+    state = await get_state(event.group_id, event.user_id, _ZERO_STATE_KEY)
     if state is None:
         # 不具有“归零”状态：静默失败
         return
@@ -217,9 +219,9 @@ async def handle_item_zero(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
     # 同步段：结算分数并按当前时刻刷新冷却记录
-    current = get_user_score(event.group_id, event.user_id)
-    _set_score(event.group_id, event.user_id, name, 0)
-    add_state(
+    current = await get_user_score(event.group_id, event.user_id)
+    await _set_score(event.group_id, event.user_id, name, 0)
+    await add_state(
         event.group_id,
         event.user_id,
         state=ItemState(
@@ -241,7 +243,7 @@ rebirth_cmd = on_command(f"item.{_ITEM_ID}.rebirth", rule=is_type(GroupMessageEv
 @rebirth_cmd.handle()
 async def handle_item_rebirth(bot: Bot, event: GroupMessageEvent) -> None:
     """处理 /item.000.rebirth 命令：将自己的决斗分数取绝对值（冷却 1 周）。"""
-    state = get_state(event.group_id, event.user_id, _REBIRTH_STATE_KEY)
+    state = await get_state(event.group_id, event.user_id, _REBIRTH_STATE_KEY)
     if state is None:
         # 不具有“新生”状态：静默失败
         return
@@ -258,10 +260,10 @@ async def handle_item_rebirth(bot: Bot, event: GroupMessageEvent) -> None:
         )
         return
     # 同步段：结算分数并按当前时刻刷新冷却记录
-    current = get_user_score(event.group_id, event.user_id)
+    current = await get_user_score(event.group_id, event.user_id)
     reborn = abs(current)
-    _set_score(event.group_id, event.user_id, name, reborn)
-    add_state(
+    await _set_score(event.group_id, event.user_id, name, reborn)
+    await add_state(
         event.group_id,
         event.user_id,
         state=ItemState(
