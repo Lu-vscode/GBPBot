@@ -6,7 +6,7 @@
   决斗点数×2；该场决斗自己未使用过 200 或 400 时可用。
 - 400 超级加倍（绿色精良、可选型）：同上，决斗点数×4。
 
-效果经决斗插件的点数缩放服务（见 _shared/services.py）直接缩放进行中的
+效果经决斗插件的点数缩放服务（见 _shared/services/）直接缩放进行中的
 决斗（不限发起方向与是否已被接受）；倍加类道具的「该场决斗已使用」登记
 在决斗结束时（结算、超时、被拒绝或被取消）经决斗事件服务清理。
 """
@@ -22,7 +22,7 @@ from src.plugins._shared.services import (
     DuelStateService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -48,7 +48,7 @@ _SCALES = {
     "400": (4, 1, "×4"),
 }
 
-# 决斗状态、点数缩放与事件服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗状态、点数缩放与事件服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _state_service = require_service(DuelStateService)
 _multiplier_service = require_service(DuelMultiplierService)

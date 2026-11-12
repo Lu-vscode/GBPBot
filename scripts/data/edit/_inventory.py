@@ -1,6 +1,6 @@
 """道具库存数据（表 gbp_item_inventory）的读取、校验与修改命令。
 
-数据由道具插件写入（对应 src/plugins/item/_models.py 的 ItemInventory）：
+数据由道具插件写入（对应 src/plugins/item/storage/models.py 的 ItemInventory）：
 主键为 (群号, 成员 QQ 号, 道具编号)，数量约束 `count > 0` 由数据库强制，
 数量归零即删除条目。本模块直接读写数据库，不导入插件代码；插件侧表
 结构变更时必须同步维护本模块的表名与列名。

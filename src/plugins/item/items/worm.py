@@ -34,14 +34,14 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, Message
 from nonebot.rule import is_type
 from nonebot_plugin_apscheduler import scheduler
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
+from src.plugins._shared.config import get_bot_list
 from src.plugins._shared.onebot import (
     member_display_name,
     send_group_text,
     sender_display_name,
     truncate_name,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -79,9 +79,6 @@ _DRAGON_DURATION_SECONDS = 86400.0
 # 显示名替换的目标文案：「区」状态称呼为“区宝宝”，「龙」状态称呼为“龙”
 _WORM_REPLACEMENT = "区宝宝"
 _DRAGON_REPLACEMENT = "龙"
-
-# 消息中群昵称的常规最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 需要按状态改写文本的发送接口：群消息与群合并转发；
 # 私聊消息不涉及群昵称，无需处理
@@ -129,9 +126,7 @@ def _name_variants(name: str) -> list[str]:
     stripped = name.strip()
     if not stripped:
         return []
-    return list(
-        dict.fromkeys((stripped, truncate_name(stripped, _NICKNAME_MAX_LENGTH)))
-    )
+    return list(dict.fromkeys((stripped, truncate_name(stripped))))
 
 
 def _as_group_id(value: Any) -> int | None:
@@ -175,7 +170,7 @@ async def _group_rewriter(group_id: int) -> _GroupRewriter | None:
 
     结果按状态变更序号与最早过期时刻缓存：状态未变化且没有状态过期
     时直接复用上次的快照，发送热路径不再遍历群内全部成员状态。
-    状态新增/移除/清理后序号变化（见 _framework.state_version），
+    状态新增/移除/清理后序号变化（见 core/registry.py 的 state_version），
     缓存自动失效重建。
     """
     now = time.time()
@@ -269,7 +264,7 @@ def _rewrite_content_segments(
 async def _rewrite_forward_data(data: dict[str, Any]) -> None:
     """改写一次群合并转发调用参数中各节点的文本段。
 
-    节点结构为本次调用新构造（见 _shared/onebot.py 的
+    节点结构为本次调用新构造（见 _shared/onebot/ 的
     send_group_forward 与帮助插件），就地改写不会有副作用；
     结构异常时跳过对应节点。
     """
@@ -439,9 +434,7 @@ async def _deliver_due_grants() -> None:
         return
     _pending_grants[:] = [grant for grant in _pending_grants if grant not in due]
     for grant in due:
-        name = await member_display_name(
-            bot, grant.group_id, grant.target_id, _NICKNAME_MAX_LENGTH
-        )
+        name = await member_display_name(bot, grant.group_id, grant.target_id)
         await acquire_curse(bot, grant.group_id, grant.target_id, name, curse)
 
 
@@ -539,7 +532,7 @@ async def _handle_wrath_use(context: ItemUseContext) -> None:
         target_name = context.user_name
     else:
         target_name = await member_display_name(
-            context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
+            context.bot, context.group_id, target_id
         )
     await context.send(
         f"{context.user_name} 使用了 {context.item.label}。\n"
@@ -658,7 +651,7 @@ async def handle_item_dragon(bot: Bot, event: GroupMessageEvent) -> None:
     if await get_state(event.group_id, event.user_id, _TRUE_DRAGON_STATE_KEY) is None:
         # 不具有“真龙”状态：静默失败
         return
-    name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    name = sender_display_name(event)
     # 先发送提示再登记状态：提示中的称呼保持成员当前显示名
     await send_group_text(
         bot,
@@ -688,7 +681,7 @@ async def handle_item_debug(bot: Bot, event: GroupMessageEvent) -> None:
     if await get_state(event.group_id, event.user_id, _TRUE_DRAGON_STATE_KEY) is None:
         # 不具有“真龙”状态：静默失败
         return
-    name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    name = sender_display_name(event)
     if not await remove_state(event.group_id, event.user_id, _STATE_KEY):
         await send_group_text(
             bot,

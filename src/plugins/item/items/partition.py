@@ -4,7 +4,7 @@
 1 小时的、指向彼此的「隔断」状态。状态有效期间持有者只能向隔断对象
 发起决斗，也只能被隔断对象发起决斗；发起不满足该条件时，发起流程
 在 challenge 事件中被本模块阻断（设置 block_reason，由决斗插件发送
-提示并取消决斗创建，见 _shared/services.py 的决斗事件服务）。
+提示并取消决斗创建，见 _shared/services/ 的决斗事件服务）。
 
 对自己使用（@自己）会使自己获得指向自己的状态：向自己发起决斗会被
 决斗模块自动拒绝，因此实际效果是 1 小时内无法发起决斗、也不会被
@@ -12,7 +12,7 @@
 不发送任何提示消息（减少 Bot 不必要的主动消息），决斗功能随之恢复。
 """
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
+from src.plugins._shared.config import get_bot_list
 from src.plugins._shared.onebot import member_display_name, truncate_name
 from src.plugins._shared.services import (
     DuelEvent,
@@ -20,7 +20,7 @@ from src.plugins._shared.services import (
     DuelEventService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -37,15 +37,12 @@ _ITEM_ID = "711"
 _STATE_KEY = f"{_ITEM_ID}.partition"
 _DURATION_SECONDS = 3600.0
 
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
-
 # 用法与错误提示文案
 _USAGE = f"请 @ 一位群成员，用法：/item.use {_ITEM_ID} @群成员"
 _SELF_STATE = "你已处于「隔断」状态。"
 _TARGET_STATE = "对方已处于「隔断」状态。"
 
-# 决斗事件服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗事件服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _event_service = require_service(DuelEventService)
 
@@ -63,7 +60,7 @@ def _state_target_name(state: ItemState, target_id: int) -> str:
     raw = str(state.data.get("target_name") or "").strip()
     if not raw:
         return f"QQ {target_id}"
-    return truncate_name(raw, _NICKNAME_MAX_LENGTH)
+    return truncate_name(raw)
 
 
 async def _can_use(context: ItemUseContext) -> str | None:
@@ -95,7 +92,7 @@ async def _handle_use(context: ItemUseContext) -> None:
         target_name = context.user_name
     else:
         target_name = await member_display_name(
-            context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
+            context.bot, context.group_id, target_id
         )
     await add_state(
         context.group_id,

@@ -5,7 +5,7 @@
 分数的成员）逐人加 1 分。
 """
 
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,

@@ -28,13 +28,13 @@ from nonebot import logger
 from nonebot.adapters import Bot as BaseBot
 from nonebot.adapters.onebot.v11 import Bot
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
+from src.plugins._shared.config import get_bot_list
 from src.plugins._shared.onebot import (
     member_display_name,
     send_group_text,
     truncate_name,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -62,9 +62,6 @@ _CHANCE_BASE = 1.1
 
 # 决斗分数换算系数：每 1 层“泡沫”对应 5 点决斗分数（结算与文案均按此计算）
 _SCORE_PER_LAYER = 5
-
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 到期提示的保留与延迟：到期后在队列保留该时长（秒）等待跟随机器人
 # 其它消息，跟随时在其后延迟该时长（秒）发出，保留期内未能发出则静默丢弃
@@ -95,7 +92,7 @@ def _state_name(data: dict[str, Any], user_id: int) -> str:
     raw = str(data.get("user_name") or "").strip()
     if not raw:
         return f"QQ {user_id}"
-    return truncate_name(raw, _NICKNAME_MAX_LENGTH)
+    return truncate_name(raw)
 
 
 async def _can_use(context: ItemUseContext) -> str | None:
@@ -117,9 +114,7 @@ async def _handle_use(context: ItemUseContext) -> None:
         # 不可达：can_use 已校验目标存在
         return
     layers = _layers_of(await get_state(context.group_id, context.user_id, _STATE_KEY))
-    target_name = await member_display_name(
-        context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
-    )
+    target_name = await member_display_name(context.bot, context.group_id, target_id)
     gained = layers + 1
     score = gained * _SCORE_PER_LAYER
     # 同步段：判定并完成全部数据变更（状态、道具与分数），再发送播报

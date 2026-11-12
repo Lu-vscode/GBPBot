@@ -16,7 +16,7 @@
 from nonebot import logger
 
 from src.plugins._shared.services import GrantedItem, ItemService, get_service
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -107,7 +107,7 @@ async def _auto_use_curses(
     context: ItemUseContext, curses: list[ItemDefinition]
 ) -> None:
     """让分裂出的黑色诅咒走标准获得流程自动使用（信息播报与效果
-    由道具服务完成，见 _shared/services.py 的 ItemService）。"""
+    由道具服务完成，见 _shared/services/ 的 ItemService）。"""
     service = get_service(ItemService)
     if service is None:
         # 不可达：主模块在插件加载期注册道具服务，事件处理时必然已注册

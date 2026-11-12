@@ -23,7 +23,7 @@ from src.plugins._shared.services import (
     DuelGestureVerdict,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -49,7 +49,7 @@ _GESTURE_COUNT = 3
 # 整局判定效果的优先级：取道具品质值
 _EFFECT_PRIORITY = Quality.BLUE
 
-# 决斗手势服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗手势服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _gesture_service = require_service(DuelGestureService)
 

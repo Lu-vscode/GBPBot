@@ -26,7 +26,7 @@ from src.plugins._shared.services import (
     DuelEventService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -46,7 +46,7 @@ _ITEM_ID = "314"
 _STATE_KEY = f"{_ITEM_ID}.ouroboros"
 _DURATION_SECONDS = 86400.0
 
-# 决斗事件服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗事件服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _event_service = require_service(DuelEventService)
 

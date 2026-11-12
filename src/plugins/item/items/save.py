@@ -10,14 +10,13 @@
 执行，本道具不介入，状态与储蓄分数保持不变。状态到期后静默消失，不改变
 决斗分数、也不发送提示。
 
-本模块经决斗插件的事件服务订阅决斗生命周期事件（见 _shared/services.py）。
+本模块经决斗插件的事件服务订阅决斗生命周期事件（见 _shared/services/）。
 """
 
 from nonebot import get_bots, logger, on_command
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 from nonebot.rule import is_type
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, sender_display_name
 from src.plugins._shared.services import (
     DuelEvent,
@@ -25,7 +24,7 @@ from src.plugins._shared.services import (
     DuelEventService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -49,10 +48,7 @@ _DURATION_SECONDS = 86400.0
 # 状态附加数据中的储蓄分数字段
 _SCORE_KEY = "score"
 
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
-
-# 决斗事件服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗事件服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _event_service = require_service(DuelEventService)
 
@@ -202,7 +198,7 @@ async def handle_item_draw(bot: Bot, event: GroupMessageEvent) -> None:
     if state is None:
         # 不具有“储蓄”状态：静默失败
         return
-    name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    name = sender_display_name(event)
     savings = _savings_of(state)
     # 同步段：结算分数并移除状态
     gained = await _apply_score_change(event.group_id, event.user_id, name, savings)

@@ -3,12 +3,12 @@
 使用后获得 1 层永久状态「+1」：每持有 1 层，每日签到获得的决斗分数
 额外 +1（层数登记在状态附加数据中，永久有效、不因时间流逝而减少）。
 
-签到分数加成经跨插件服务提供给签到插件（见 _shared/services.py 的
+签到分数加成经跨插件服务提供给签到插件（见 _shared/services/ 的
 SignScoreBonusService）：本模块只负责按状态层数登记加成提供者，签到
-时由框架汇总（见 _framework.sign_bonus）。
+时由框架汇总（见 core/sign_bonus.py 的 sign_bonus）。
 """
 
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,

@@ -3,7 +3,7 @@
 获得后不进入库存，由主模块先发送完整信息、随后自动使用：决斗分数 -1。
 """
 
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemUseContext,

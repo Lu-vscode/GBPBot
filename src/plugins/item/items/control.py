@@ -15,9 +15,8 @@ from dataclasses import dataclass
 
 from nonebot import logger
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import member_display_name
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -37,9 +36,6 @@ _ITEM_ID = "714"
 
 # 可被驱使的道具的最高品质
 _MAX_QUALITY = Quality.BLUE
-
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 用法与错误提示文案
 _USAGE = (
@@ -136,7 +132,7 @@ async def _handle_use(context: ItemUseContext) -> None:
         await context.send(_STALE_FAILED)
         return
     target_name = await member_display_name(
-        context.bot, context.group_id, parsed.user_id, _NICKNAME_MAX_LENGTH
+        context.bot, context.group_id, parsed.user_id
     )
     inner = ItemUseContext(
         bot=context.bot,

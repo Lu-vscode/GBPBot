@@ -18,7 +18,7 @@ from nonebot.adapters.onebot.v11 import Bot
 
 from src.plugins._shared.onebot import send_group_text
 from src.plugins._shared.services import DuelScoreInterceptService, require_service
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -36,7 +36,7 @@ _ITEM_ID = "406"
 _STATE_KEY_PREFIX = f"{_ITEM_ID}.invulnerable."
 _DURATION_SECONDS = 3600.0
 
-# 决斗分数拦截服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗分数拦截服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _intercept_service = require_service(DuelScoreInterceptService)
 

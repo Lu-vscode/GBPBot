@@ -3,7 +3,7 @@
 使用后决斗分数 +1；作为最基础的道具，被开发用作道具框架的参考实现。
 """
 
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,

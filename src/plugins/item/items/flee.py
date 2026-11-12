@@ -16,13 +16,13 @@ from src.plugins._shared.services import (
     DuelStateService,
     require_service,
 )
-from src.plugins.item._durability import durable_behavior
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemDefinition,
     ItemKind,
     ItemUseContext,
     Quality,
     add_item,
+    durable_behavior,
     register_item,
 )
 
@@ -30,7 +30,7 @@ from src.plugins.item._framework import (
 _ITEM_ID = "886"
 _DURABILITY_TOTAL = 3
 
-# 决斗状态与取消服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗状态与取消服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _state_service = require_service(DuelStateService)
 _cancel_service = require_service(DuelCancelService)

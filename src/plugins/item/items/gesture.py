@@ -29,7 +29,7 @@ from src.plugins._shared.services import (
     DuelGestureService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -53,7 +53,7 @@ _ROCK = 3
 _RULE_PRIORITY = Quality.GREEN
 _RULE_NAME = "121~124 特殊手势"
 
-# 决斗手势服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗手势服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _gesture_service = require_service(DuelGestureService)
 

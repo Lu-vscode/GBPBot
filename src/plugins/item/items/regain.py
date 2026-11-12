@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 
 from nonebot import logger
 
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,

@@ -14,7 +14,7 @@ from src.plugins._shared.services import (
     DuelStateService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -27,7 +27,7 @@ from src.plugins.item._framework import (
 # 道具编号
 _ITEM_ID = "108"
 
-# 决斗状态与挑衅服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗状态与挑衅服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _state_service = require_service(DuelStateService)
 _provoke_service = require_service(DuelProvokeService)

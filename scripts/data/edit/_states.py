@@ -1,6 +1,6 @@
 """道具状态数据（表 gbp_item_state）的读取、校验与修改命令。
 
-数据由道具插件写入（对应 src/plugins/item/_models.py 的 ItemStateRow）：
+数据由道具插件写入（对应 src/plugins/item/storage/models.py 的 ItemStateRow）：
 主键为 (群号, 成员 QQ 号, 状态键)，同键状态直接覆盖；`expires_at` 为
 NULL 表示永久，`data` 为道具模块自定义的 JSON 附加数据。本模块直接
 读写数据库，不导入插件代码；插件侧表结构变更时必须同步维护本模块的

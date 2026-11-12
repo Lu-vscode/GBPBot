@@ -3,6 +3,11 @@
 > 依据：用户要求"将 src 中各插件/插件包的持久存储方案重构为基于 nonebot-plugin-orm"。
 > 本文档是本次实现的完整设计记录，供审核后执行；未在需求中明确、由本方案决定的细节
 > 均记录在此，供后续维护参考。
+>
+> 注：本文记录的是 ORM 迁移当时的文件布局。此后 duel 与 item 已按职责拆分子包
+> （见 `docs/plan/item.md` §3）：文中 `duel/_models.py` → `duel/models.py`，
+> `item/_models.py` → `item/storage/models.py`，`item/_store.py` → `item/storage/`，
+> `item/_framework.py` → `item/core/`；测试脚本目录此后亦由 `tests/items/` 更名为 `tests/item/`。
 
 ## 1. 背景与目标
 
@@ -44,7 +49,7 @@
 ```
 src/plugins/
 ├── _shared/
-│   ├── services.py      # 契约改为 async（破坏性变更，见 §5.4）
+│   ├── services/        # 契约改为 async（破坏性变更，见 §5.4）
 │   └── jsonfile.py      # 本次删除（迁移后无 JSON 写入）
 ├── duel/
 │   ├── _models.py       # 新增：gbp_duel_score
@@ -256,7 +261,7 @@ CREATE TABLE gbp_sign_record (
 - 中途失败时保留"当天已签到但未发奖"的状态（比重复领奖安全），异常只记错误日志
 - 依赖声明不变：`require("duel")`、`require("item")`，另加 `require("nonebot_plugin_orm")`
 
-### 5.4 `_shared/services.py`（破坏性契约变更）
+### 5.4 `_shared/services/`（破坏性契约变更）
 
 | 契约 | 变更 |
 | --- | --- |
@@ -372,7 +377,7 @@ CREATE TABLE gbp_sign_record (
    实测迁移命令形态
 2. `pyproject.toml`、`.env*`、`.gitignore` 配置落地
 3. `duel`：`_models.py` + `_scores.py` 重写 + `_flow.py`/`__init__.py` 调用点
-4. `_shared/services.py` 契约改异步（此步起 item/sign 编译期即暴露待改点）
+4. `_shared/services/` 契约改异步（此步起 item/sign 编译期即暴露待改点）
 5. `item`：`_models.py` + `_store.py` + `_framework.py` + `_durability.py` + `__init__.py`，
    再逐个改 `items/*.py`
 6. `sign.py`：模型 + 唯一约束签到流程

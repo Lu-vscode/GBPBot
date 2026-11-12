@@ -30,7 +30,7 @@ from src.plugins._shared.config import (
     get_nickname_guard_disabled_groups,
 )
 from src.plugins._shared.services import DuelBotAcceptService, require_service
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -75,7 +75,7 @@ _USAGE_NICKNAME_GUARD = (
 _ENV_ACCESS_ERROR = "环境配置文件访问失败，本次未消耗道具。"
 _ENV_WRITE_ERROR = "天意未能被篡改：写入配置文件失败，道具已退还。"
 
-# 表达式校验服务（由决斗插件提供；_framework 已 require("duel") 保证
+# 表达式校验服务（由决斗插件提供；core/scores.py 已 require("duel") 保证
 # 服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _accept_service = require_service(DuelBotAcceptService)
 

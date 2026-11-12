@@ -4,11 +4,12 @@
 - 094 庸夫之怒（灰色垃圾、消耗型）：使用后自己的决斗分数-80、决斗高分榜
   第一名分数-1（以使用前的第一名为准，自己即第一名时共-81）；群内没有
   正分成员（高分榜为空）时不可用。
-- 095 天子之怒（紫色史诗、复合型）：使用 /item.use 095 @成员 将其决斗分数
-  设为-1；仅自身位列决斗高分榜第一名、对方决斗分数非负时可用。道具信息
-  显示的耐久为 4/1000000，实际耐久 4/4：每使用一次对已耗损副本扣 1 点
-  耐久（归零时道具消失），没有耗损副本时开始耗损一件全新副本；未使用过
-  （耐久 4）的副本可正常交换/合成，已耗损的副本不可。
+- 095 天子之怒（紫色史诗、复合型：可选型与耐久型的复合）：
+  使用 /item.use 095 @成员 将其决斗分数设为-1；仅自身位列决斗高分榜
+  第一名、对方决斗分数非负时可用。道具信息显示的耐久为 4/1000000，
+  实际耐久 4/4：每使用一次对已耗损副本扣 1 点耐久（归零时道具消失），
+  没有耗损副本时开始耗损一件全新副本；未使用过（耐久 4）的副本可正常
+  交换/合成，已耗损的副本不可。
 - 096 布衣之怒（白色普通、可选型）：在决斗中使用 /item.use 096 @成员 发起
   刺杀（自己的决斗分数为 0、对方位列决斗高分榜第一名、双方存在进行中的
   决斗，决斗是自己/对方发起的均可）；决斗出拳环节结束时接管结算：自己
@@ -18,7 +19,7 @@
   白色普通的品质值注册结算接管者，见 switch.py）：096 的接管者不会被
   调用，本次刺杀作废（道具已消耗、不退还），登记在 settled 事件中清理。
 
-本模块经决斗插件的事件服务订阅决斗生命周期事件（见 _shared/services.py）：
+本模块经决斗插件的事件服务订阅决斗生命周期事件（见 _shared/services/）：
 096 经结算接管服务（DuelSettleService）注册结算接管者，在 settling 事件
 全部处理器完成后按优先级接管结算；在 settled/timeout/rejected/canceled
 事件中清理等待中的刺杀登记。
@@ -29,7 +30,6 @@ import random
 from nonebot import get_bots, logger
 from nonebot.adapters.onebot.v11 import Bot
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import member_display_name, send_group_text
 from src.plugins._shared.services import (
     DuelEvent,
@@ -40,8 +40,7 @@ from src.plugins._shared.services import (
     DuelStateService,
     require_service,
 )
-from src.plugins.item._durability import durable_behavior
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -49,6 +48,7 @@ from src.plugins.item._framework import (
     Quality,
     add_item,
     add_user_score,
+    durable_behavior,
     get_highest_score_user,
     get_user_score,
     register_item,
@@ -59,15 +59,12 @@ _ID_FOOL = "094"
 _ID_KING = "095"
 _ID_COMMONER = "096"
 
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
-
 # 「天子之怒」的耐久参数：显示总耐久 1000000，实际总耐久 4
 _DURABILITY_TOTAL = 4
 _DURABILITY_DISPLAY_TOTAL = 1_000_000
 _DURABILITY_DISPLAY = f"{_DURABILITY_TOTAL}/{_DURABILITY_DISPLAY_TOTAL}"
 
-# 决斗状态、事件与结算接管服务（由决斗插件提供；_framework 已
+# 决斗状态、事件与结算接管服务（由决斗插件提供；core/scores.py 已
 # require("duel") 保证服务已注册；服务缺失时本道具模块加载失败并被
 # 加载器忽略）
 _state_service = require_service(DuelStateService)
@@ -103,9 +100,7 @@ async def _handle_fool(context: ItemUseContext) -> None:
     if first_id == context.user_id:
         first_name = context.user_name
     else:
-        first_name = await member_display_name(
-            context.bot, context.group_id, first_id, _NICKNAME_MAX_LENGTH
-        )
+        first_name = await member_display_name(context.bot, context.group_id, first_id)
     await context.add_score(-_FOOL_SELF_COST)
     await add_user_score(context.group_id, first_id, first_name, -_FOOL_FIRST_COST)
     await context.send(
@@ -134,9 +129,7 @@ async def _handle_king(context: ItemUseContext) -> None:
     if target_id is None:
         # 不可达：can_use 已校验参数与目标存在
         return
-    target_name = await member_display_name(
-        context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
-    )
+    target_name = await member_display_name(context.bot, context.group_id, target_id)
     old = await get_user_score(context.group_id, target_id)
     await add_user_score(context.group_id, target_id, target_name, -1 - old)
     await context.send(
@@ -300,6 +293,8 @@ register_item(
     )
 )
 
+# 095 的分类为复合型：可选型（必须 @ 一位成员才可使用）与耐久型
+# （耐久 4/4，使用后开始耗损副本）的复合
 register_item(
     ItemDefinition(
         item_id=_ID_KING,

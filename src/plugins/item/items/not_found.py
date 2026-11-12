@@ -4,7 +4,7 @@
 1 小时的「404」状态。状态有效期间该成员无法发起决斗，也不会被他人
 发起决斗——发起流程在 challenge 事件中被本模块阻断（设置 block_reason
 为"404 Not Found"，由决斗插件发送提示并取消决斗创建，见
-_shared/services.py 的决斗事件服务）。
+_shared/services/ 的决斗事件服务）。
 
 状态到期后静默解除：过期状态由定时清理直接删除，不发送任何提示
 消息（减少 Bot 不必要的主动消息），决斗功能随之恢复。
@@ -16,7 +16,7 @@ from src.plugins._shared.services import (
     DuelEventService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemState,
@@ -37,7 +37,7 @@ _DURATION_SECONDS = 3600.0
 # 阻断决斗发起时发送的提示文案（自身发起与被发起时相同）
 _BLOCK_REASON = "404 Not Found"
 
-# 决斗事件服务（由决斗插件提供；_framework 已 require("duel")
+# 决斗事件服务（由决斗插件提供；core/scores.py 已 require("duel")
 # 保证服务已注册；服务缺失时本道具模块加载失败并被加载器忽略）
 _event_service = require_service(DuelEventService)
 

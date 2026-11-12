@@ -6,15 +6,14 @@
 
 耐久型道具的耗损副本同样可以强塞：转移时把最早开始耗损的副本（即
 详情中显示剩余耐久的那一件）连同剩余耐久一并转给使用对象，见
-item/_durability.py 的 move_damaged_instance。
+item/core/durability.py 的 move_damaged_instance。
 """
 
 from nonebot import logger
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH, get_bot_list
+from src.plugins._shared.config import get_bot_list
 from src.plugins._shared.onebot import member_display_name
-from src.plugins.item._durability import move_damaged_instance
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -24,6 +23,7 @@ from src.plugins.item._framework import (
     get_item,
     get_item_count,
     is_item_id,
+    move_damaged_instance,
     quality_label,
     register_item,
     remove_item,
@@ -32,9 +32,6 @@ from src.plugins.item._framework import (
 # 道具编号与可强塞的品质上限
 _ITEM_ID = "127"
 _MAX_QUALITY = Quality.PURPLE
-
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 用法与错误提示文案
 _USAGE = f"请 @ 一位群成员并提供道具编号，用法：/item.use {_ITEM_ID} @群成员 <道具编号>"
@@ -101,9 +98,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     remaining = await move_damaged_instance(
         context.group_id, context.user_id, target_id, target.item_id
     )
-    target_name = await member_display_name(
-        context.bot, context.group_id, target_id, _NICKNAME_MAX_LENGTH
-    )
+    target_name = await member_display_name(context.bot, context.group_id, target_id)
     lines = [
         f"{context.user_name} 使用了 {context.item.label}，"
         f"把 {target.label} 强行塞给了 {target_name}：白送的东西，不要也得要。"

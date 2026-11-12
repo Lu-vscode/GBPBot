@@ -25,7 +25,7 @@ from src.plugins._shared.services import (
     DuelStateService,
     require_service,
 )
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -44,7 +44,7 @@ _NO_DUEL = "你与该成员没有进行中的决斗。"
 _ALREADY_USED = "本场决斗中已有人使用过魂迁。"
 _REFUND_TEXT = "使用失败：该决斗已不在进行中，道具已退还。"
 
-# 决斗状态、事件与结算接管服务（由决斗插件提供；_framework 已
+# 决斗状态、事件与结算接管服务（由决斗插件提供；core/scores.py 已
 # require("duel") 保证服务已注册；服务缺失时本道具模块加载失败并被
 # 加载器忽略）
 _state_service = require_service(DuelStateService)

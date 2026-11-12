@@ -26,18 +26,25 @@
 ```
 src/plugins/
 ├── _shared/
-│   ├── services.py   # 跨插件服务契约与注册中心（本次大幅扩展）
-│   ├── config.py     # 新增：跨插件共享配置（BOT_LIST 机器人名单）
-│   └── onebot.py     # 新增：群聊消息发送、群昵称获取/截断等共享工具
-├── duel/             # 重构（已拆包为包插件）：按职责拆成 _models（分数表）、_scores（异步分数
-│                     #   服务）、_events、_flow、_gestures、_judgement、_messages、_services、
-│                     #   _state、_limit、_config，详见各模块 docstring
+│   ├── services/     # 跨插件服务契约与注册中心（本次大幅扩展）：registry.py 注册中心、
+│   │                 #   duel/ 决斗契约子包（score/state/event/gesture/action）、
+│   │                 #   item.py 道具发放、sign.py 签到加成
+│   ├── config/       # 新增：跨插件共享配置（model/parse/bot_list/nickname/nickname_guard）
+│   └── onebot/       # 新增：共享工具（messaging.py 群聊消息发送、naming.py 群昵称获取/截断）
+├── duel/             # 重构（已拆包为包插件）：按职责分为 config（配置与文案）、
+│                     #   core（值对象、存储、手势、判定）、flow（结算、机器人出手）、
+│                     #   messaging（发送、延迟跟发）、services（对外服务）、
+│                     #   commands（六个指令）与 runtime.py、limit.py、models.py
 ├── item/             # 新增：道具插件包（NoneBot 包插件，模块名 src.plugins.item）
-│   ├── __init__.py   # 主模块：配置、指令、抽取/合成/交换/使用/诅咒流程、服务注册、定时清理
-│   ├── _framework.py # 道具定义/注册表、品质与分类枚举、功能标签、使用上下文、状态 API、抽取代数
-│   ├── _durability.py # 耐久型道具的公共逻辑（副本耗损、可交易数量、详情耐久、行为块工厂）
-│   ├── _models.py    # ORM 模型：gbp_item_inventory、gbp_item_state
-│   ├── _store.py     # 两张表的异步读写原语（单事务、按群锁串行化）
+│   ├── __init__.py   # 主模块：插件元数据、配置注入、服务实例注册、启动日志
+│   ├── config/       # 配置：Config 模型（model.py）与解析后的抽取/合成概率（resolve.py）
+│   ├── storage/      # 存储层：ORM 模型、群锁、库存与状态读写原语
+│   ├── core/         # 道具核心：定义与注册表、库存/状态 API、使用流程、抽取、合成、耐久
+│   ├── commands/     # 查看、合成、使用、测试获取指令与用法文案
+│   ├── exchange/     # 交换：请求内存队列（queue.py）与三条交换指令（commands.py）
+│   ├── services.py   # ItemService / SignScoreBonusService 的实现与注册
+│   ├── messaging.py  # 指令与交换共用：文本发送、@ 解析、群昵称截断
+│   ├── cleanup.py    # 过期状态与过期交换请求的定时清理
 │   └── items/
 │       ├── __init__.py  # 自动发现并导入本包下所有道具模块
 │       ├── plus_one.py  # 道具 111「+1」
@@ -45,8 +52,12 @@ src/plugins/
 └── sign.py           # 更新：签到发放道具、记录道具编号、文案变体
 ```
 
+包内依赖方向单向：`config → core → commands/exchange/services/cleanup → __init__`；
+`storage` 与 `core` 内部子模块互相导入具体模块、不经包入口转一手；道具模块
+（`items/`）只从 `core` 包导入。
+
 依赖关系（加载期 `require`）：`item` require `duel`；`sign` require `duel`、`item`。
-子模块（`item._framework` 等）由包内普通导入加载，不会被 NoneBot 当作独立插件
+子模块（`item.core` 等）由包内普通导入加载，不会被 NoneBot 当作独立插件
 （扫描为非递归、仅顶层）；`_shared` 以下划线开头不会被加载。
 
 ## 4. 数据与存储
@@ -55,7 +66,7 @@ src/plugins/
 `data/nonebot_plugin_orm/db.sqlite3`（路径由 `.env` 的 `SQLALCHEMY_DATABASE_URL` 指定）：
 旧版 `data/item/inventory.json`、`data/item/states.json` 已废弃，由
 `scripts/data/migrate_orm.py` 一次性迁移（旧文件改名归档为 `*.migrated-<时间戳>`）。
-模型定义在 `item/_models.py`，表名统一加 `gbp_` 前缀：
+模型定义在 `item/storage/models.py`，表名统一加 `gbp_` 前缀：
 
 - `gbp_item_inventory`：道具库存，主键 `(group_id, user_id, item_id)`
   - `item_id` 为三位数字字符串（`String(3)`）；`count` 为正整数，约束
@@ -65,7 +76,8 @@ src/plugins/
   - `expires_at` 为 Unix 时间戳（墙钟，重启不丢失）的 `Float`，`NULL` 表示永久；
     过期清理依赖索引 `ix_gbp_item_state_expires`
   - `data` 为道具模块自定义的附加数据（JSON 列，须可 JSON 序列化）
-- 读写全部收敛在 `item/_store.py`：每个函数自行开事务
+- 读写全部收敛在 `item/storage/`（`inventory.py` 库存、`states.py` 状态、`lock.py` 群锁）：
+  每个函数自行开事务
   （`async with get_session() as session, session.begin()`），复合操作（批量扣减、
   双方交换、整批写入状态）在单事务内完成，任一步不满足条件整体回滚；
   “先校验、后修改”的流程（使用、交换、合成）由 `group_lock(group_id)` 按群串行化，
@@ -77,9 +89,9 @@ src/plugins/
 
 - 待处理交换 `_exchanges: list[_PendingExchange]`：有效期 10 分钟，**仅存内存**，过期静默删除；
   定时任务（30 秒）与指令入口双重清理
-- 状态不再常驻内存：经 `_store.py` 按需读写数据库（热点是单成员单状态，开销可忽）
+- 状态不再常驻内存：经 `storage/states.py` 按需读写数据库（热点是单成员单状态，开销可忽）
 
-## 5. 道具框架（`_framework.py`）
+## 5. 道具框架（`item/core/`）
 
 ### 5.1 品质、分类与标签
 
@@ -87,7 +99,8 @@ src/plugins/
   （数值用于合成 ±1/±2 运算与"品质由高到低"排序）
 - 品质显示名：黑色诅咒 / 灰色垃圾 / 白色普通 / 绿色精良 / 蓝色稀有 / 紫色史诗 / 金色传说
 - `ItemKind(Enum)`（展示分类，单值、互斥，用于详情与分类统计）：消耗型 / 诅咒型 / Buff型 /
-  永久型 / 可选型 / 复合型；诅咒型可由黑色诅咒品质派生，该类道具可省略 `kind`
+  永久型 / 可选型 / 复合型 / 耐久型；诅咒型可由黑色诅咒品质派生，该类道具可省略 `kind`；
+  耐久型专指效果仅为消耗耐久的道具，耐久与其它机制叠加的仍记为复合型
 - `ItemTag(StrEnum)`（功能标签，可多值，只记录"具备什么机制"，用于 `has_tag`/`items_with_tag`
   查询）：复制型
 - 分类与标签是两条互不相交的轴：分类回答"它是什么"，标签回答"它具备什么机制"，
@@ -168,7 +181,7 @@ class ItemUseContext:
 - `await purge_expired_states()`：定时清理（事务内删除并返回到期列表）
 - 状态按群隔离；道具模块可据此实现"状态期间的特殊效果/限定指令"（如经行内判定 `get_state`）
 
-### 5.6 耐久型道具（`_durability.py`）
+### 5.6 耐久型道具（`core/durability.py`）
 
 - 数据模型：库存数量 + 耗损状态 `<道具编号>.durability`（附加数据 `remaining`
   为各副本剩余耐久列表，按开始耗损的先后排列）；未使用过的副本是全新的
@@ -187,7 +200,10 @@ class ItemUseContext:
 
 ### 6.1 查看：`/item.list`、`/item.detail <编号>`
 
-- `/item.list`：按品质由高到低（同品质按编号升序）列出"编号 名称【品质】×数量"；
+- `/item.list`：按品质由高到低（同品质按编号升序）列出"编号 名称【品质】×数量"，
+  首行为"<群昵称> 的道具："；种类数超过阈值（`ITEM_LIST_FORWARD_THRESHOLD`，默认 10）时
+  整份清单以**合并转发**发送（单节点，节点名"道具清单"，不引用触发消息），
+  不超过阈值时按普通文本回复并引用触发消息；
   无道具时提示"你还没有任何道具，签到可以获得随机道具。"
 - `/item.detail <编号>`（别名 `/item.info`）：仅可查看自己拥有的道具；不存在/未拥有/参数错误分别提示；
   详情（编号/名称/品质/类型/介绍/功能/使用条件/使用时机/耐久/备注）以**合并转发**发送（单节点，节点名"道具详情"，uin 为机器人 QQ）
@@ -239,7 +255,7 @@ class ItemUseContext:
 
 ## 7. duel 重构（对外接口）
 
-### 7.1 `_shared/services.py` 新增/扩展契约
+### 7.1 `_shared/services/` 新增/扩展契约
 
 - `DuelScoreService`（扩展）：`add_score(group_id, user_id, name, delta) -> int`、`get_score(group_id, user_id) -> int`
   （均为异步接口，直接读写 `gbp_duel_score`；`name` 随分数变化一并更新）
@@ -252,6 +268,7 @@ class ItemUseContext:
 | --- | --- | --- |
 | `challenge` | 发起校验通过、登记决斗前 | `block_reason`（设置后取消发起并发送该文案） |
 | `created` | 决斗登记后、发起播报发送后 | 无 |
+| `accepting` | 对方接受决斗前 | `block_reason`（设置后取消本次接受并发送该文案，决斗保持待接受） |
 | `accepted` | 对方接受（含机器人掷骰接受）后 | 无 |
 | `rejected` | 拒绝（含机器人掷骰拒绝）后 | 无 |
 | `gesture` | 记录任一方猜拳手势后 | 无 |
@@ -275,7 +292,7 @@ class ItemUseContext:
 ### 7.2 行为保持
 
 - 所有现有文案、判定（含胜负手势表）、超时延迟播报、并发防重逻辑**不变**；
-  仅将 `_send_text`/群昵称获取、截断等改为复用 `_shared/onebot.py`
+  仅将 `_send_text`/群昵称获取、截断等改为复用 `_shared/onebot/`
 - `settling` 处理器改写胜负会被还原并记 error（胜负只能经 `DuelGestureService`
   判定规则或结算接管改变）；点数负数取 0；结果播报使用判定结果
 
@@ -300,13 +317,15 @@ ITEM_DRAW_GOLD=0.005    # 金色传说
 ITEM_CRAFT_DOWN=0.24    # 合成：低一级
 ITEM_CRAFT_UP=0.75      # 合成：高一级
 ITEM_CRAFT_UP2=0.01     # 合成：高两级
-BOT_LIST=[111111, 222222] # 共享配置：机器人名单（所有群通用，见 _shared/config.py）
+ITEM_LIST_FORWARD_THRESHOLD=10 # /item.list：道具种类超过该值时整份清单以合并转发发送
+BOT_LIST=[111111, 222222] # 共享配置：机器人名单（所有群通用，见 _shared/config/bot_list.py）
 ```
 
 解析规则（按设计文档）：缺失/为空用默认值；无法解析为数字报错并用默认值；
 负数视为 0；抽取概率与合成概率的总和不为 1 时分别归一化；
 总和为 0 时视为无效配置、报错并用默认值。
 均带容差处理（默认值浮点相加为 1.0000000000000002，不做无谓归一化）。
+`ITEM_LIST_FORWARD_THRESHOLD` 需为正整数，缺失、为空、非整数或不为正数时报错并用默认值 10。
 
 道具功能文案（含失败、交换、使用等）全部内置，不经 env 配置。
 

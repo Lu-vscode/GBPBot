@@ -7,10 +7,10 @@
 编号越大品质越低、可复制的品质上限越低。
 
 六件道具均声明 ItemTag.COPY 标签，供其它道具按“非复制道具”为条件
-排除（见 _framework.items_with_tag），无需从本模块导出编号集合。
+排除（见 core/registry.py 的 items_with_tag），无需从本模块导出编号集合。
 """
 
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,

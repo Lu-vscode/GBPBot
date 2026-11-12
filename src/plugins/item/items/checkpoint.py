@@ -17,9 +17,8 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
 from nonebot.params import CommandArg
 from nonebot.rule import is_type
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, sender_display_name
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -48,9 +47,6 @@ _COUNT_KEY = "count"
 
 # 指令参数错误的提示文案
 _USAGE_LOAD = f"用法：/item.{_ITEM_ID}.load <存档点分数>"
-
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 
 def _state_key(score: int) -> str:
@@ -151,7 +147,7 @@ async def handle_item_checkpoint(bot: Bot, event: GroupMessageEvent) -> None:
     if not entries:
         # 不具有“存档点”状态：静默失败
         return
-    name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    name = sender_display_name(event)
     current = await get_user_score(event.group_id, event.user_id)
     lines = [f"{name} 的存档点："]
     lines.extend(f"决斗分数 {score} ×{count}" for score, count in entries)
@@ -191,7 +187,7 @@ async def handle_item_load(
             label="道具消息",
         )
         return
-    name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    name = sender_display_name(event)
     before = await get_user_score(event.group_id, event.user_id)
     remaining = _state_count(state) - 1
     # 同步段：结算分数并把该存档点的份数 -1（归零时该存档点消失）

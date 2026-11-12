@@ -3,7 +3,7 @@
 
 使用 /item.use <保险编号> <道具1编号> <道具2编号> 合成两件与保险同品质的
 道具：合成产物与概率和默认合成（/item.craft）完全相同，两者共用
-_craft.py 的抽取与材料校验。合成失败（抽到低一级品质）时，重新获得
+core/craft.py 的抽取与材料校验。合成失败（抽到低一级品质）时，重新获得
 消耗的两件材料、失败的产物照常保留；合成成功与大成功不返还材料。
 保险道具自身不能作为本组的合成材料（否则耐久消耗与材料移除会对同一
 副本重复结算，见 _can_use）。
@@ -15,15 +15,17 @@ _craft.py 的抽取与材料校验。合成失败（抽到低一级品质）时�
 
 from nonebot import logger
 
-from src.plugins.item._craft import FAILED_PREFIX, craft_error, draw_craft_results
-from src.plugins.item._durability import durable_behavior
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
+    FAILED_PREFIX,
     ItemDefinition,
     ItemKind,
     ItemUseContext,
     Quality,
     acquire_curse,
     add_items,
+    craft_error,
+    draw_craft_results,
+    durable_behavior,
     get_item,
     is_item_id,
     quality_label,

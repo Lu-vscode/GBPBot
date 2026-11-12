@@ -23,9 +23,8 @@ from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 from nonebot.rule import is_type
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, sender_display_name
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -61,11 +60,8 @@ _REBIRTH_COOLDOWN_SECONDS = 604800.0
 # 使用 000 时随使用者一同归零的其它成员人数上限
 _OTHER_LIMIT = 10
 
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
-
 # 清空状态文案中的状态显示名由产生状态的道具在 labels 中声明（见
-# _framework.state_label），未声明的回退为道具名称
+# core/registry.py 的 state_label），未声明的回退为道具名称
 
 
 async def _set_score(group_id: int, user_id: int, name: str, score: int) -> None:
@@ -76,7 +72,7 @@ async def _set_score(group_id: int, user_id: int, name: str, score: int) -> None
 
 
 def _state_label(state: ItemState) -> str:
-    """返回状态在文案中的显示名（见 _framework.state_label）。"""
+    """返回状态在文案中的显示名（见 core/registry.py 的 state_label）。"""
     return state_label(state)
 
 
@@ -206,7 +202,7 @@ async def handle_item_zero(bot: Bot, event: GroupMessageEvent) -> None:
     if state is None:
         # 不具有“归零”状态：静默失败
         return
-    name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    name = sender_display_name(event)
     now = time.time()
     remaining = _cooldown_remaining(state, now=now)
     if remaining is not None:
@@ -247,7 +243,7 @@ async def handle_item_rebirth(bot: Bot, event: GroupMessageEvent) -> None:
     if state is None:
         # 不具有“新生”状态：静默失败
         return
-    name = sender_display_name(event, _NICKNAME_MAX_LENGTH)
+    name = sender_display_name(event)
     now = time.time()
     remaining = _cooldown_remaining(state, now=now)
     if remaining is not None:

@@ -9,8 +9,9 @@
 或发送失败时只记录日志、不补发）。所有 @ 均为伪 @（"@昵称"为纯文本，
 非 at 消息段）。
 
-251 为灰色垃圾、消耗型：使用后发送当前时间（精确到秒、含日期），并引用
-触发指令的消息。
+251 为灰色垃圾、耐久型：使用后发送当前时间（精确到秒、含日期），
+并引用触发指令的消息。耐久 3/3：每使用一次对已耗损副本扣 1 点耐久（归零时
+道具消失），没有耗损副本时开始耗损一件全新副本。
 """
 
 import random
@@ -24,9 +25,8 @@ from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
 from nonebot.params import CommandArg
 from nonebot.rule import is_type
 
-from src.plugins._shared.config import NICKNAME_MAX_LENGTH
 from src.plugins._shared.onebot import send_group_text, truncate_name
-from src.plugins.item._framework import (
+from src.plugins.item.core import (
     ItemBehavior,
     ItemDefinition,
     ItemKind,
@@ -37,6 +37,7 @@ from src.plugins.item._framework import (
     add_item,
     add_state,
     add_user_score,
+    durable_behavior,
     get_state,
     get_user_score,
     register_item,
@@ -47,15 +48,13 @@ from src.plugins.item._framework import (
 _ITEM_ID = "250"
 _STATE_KEY = "curse.250"
 
-# 奖品「華為手錶」的编号：答对时按剩余回答时长决定是否发放
+# 奖品「華為手錶」的编号与总耐久：答对时按剩余回答时长决定是否发放
 _WATCH_ITEM_ID = "251"
+_WATCH_DURABILITY_TOTAL = 3
 
 # 解题限时（分钟）与换算后的秒数：自出题时刻起共 10 分钟
 _SOLVE_MINUTES = 10
 _SOLVE_SECONDS = _SOLVE_MINUTES * 60.0
-
-# 消息中群昵称的最大显示长度（字符数，共享配置 NICKNAME_MAX_LENGTH）
-_NICKNAME_MAX_LENGTH = NICKNAME_MAX_LENGTH
 
 # 题库：题面（纯文本，公式为 LaTeX 源码）与答案（均为整数）
 _PROBLEMS: tuple[tuple[str, int], ...] = (
@@ -103,7 +102,7 @@ def _state_name(data: dict[str, Any], user_id: int) -> str:
     raw = str(data.get("user_name") or "").strip()
     if not raw:
         return f"QQ {user_id}"
-    return truncate_name(raw, _NICKNAME_MAX_LENGTH)
+    return truncate_name(raw)
 
 
 async def _zero_score(group_id: int, user_id: int, name: str) -> None:
@@ -249,11 +248,13 @@ register_item(
         item_id=_WATCH_ITEM_ID,
         name="華為手錶",
         quality=Quality.GRAY,
-        kind=ItemKind.CONSUMABLE,
+        kind=ItemKind.DURABLE,
         description="告诉学生們，去修birkar的課，交論文，得分最高的，獎一个华为手表。",
         effect="使用后bot会告诉你当前时间。",
         note="發自我的手機",
-        behavior=ItemBehavior(
+        durability=f"{_WATCH_DURABILITY_TOTAL}/{_WATCH_DURABILITY_TOTAL}",
+        behavior=durable_behavior(
+            total=_WATCH_DURABILITY_TOTAL,
             use=_handle_watch_use,
         ),
     )
