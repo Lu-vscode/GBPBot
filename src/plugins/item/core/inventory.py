@@ -5,7 +5,7 @@
 按品质排序的清单。
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from nonebot import logger
 
@@ -13,7 +13,9 @@ from src.plugins.item.core.definition import ItemDefinition
 from src.plugins.item.core.registry import get_item
 from src.plugins.item.storage.inventory import (
     add_to_inventory,
+    load_group_inventory,
     load_item_counts,
+    replace_group_inventory,
     swap_items,
     take_from_inventory,
 )
@@ -87,6 +89,27 @@ async def exchange_items(
     return await swap_items(
         group_id, initiator_id, initiator_item_id, target_id, target_item_id
     )
+
+
+async def snapshot_group_inventory(group_id: int) -> dict[int, dict[str, int]]:
+    """返回本群全部成员的库存快照（成员 QQ 号 -> {道具编号: 数量}）。
+
+    没有库存记录的成员不出现在快照中；供需要按群整体记录库存的道具
+    使用（如「二阶堂希罗」的“死亡回溯”）。
+    """
+    return await load_group_inventory(group_id)
+
+
+async def restore_group_inventory(
+    group_id: int, snapshot: Mapping[int, Mapping[str, int]]
+) -> None:
+    """把本群的全部库存整体恢复为快照（单个事务）。
+
+    快照之后的库存变化全部被覆盖：快照中没有的成员库存被清空、数量
+    被改回快照值。只处理库存数量：耐久型道具的耗损副本记录（状态）
+    等不在此恢复。
+    """
+    await replace_group_inventory(group_id, snapshot)
 
 
 async def list_user_items(

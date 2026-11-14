@@ -14,6 +14,9 @@ iter_items、has_tag 等）、库存与状态 API、使用流程与钩子、抽�
 - scores.py / sign_bonus.py：决斗分数服务的桥接与签到分数加成；
 - draw.py / craft.py / durability.py：随机抽取、合成与耐久型行为。
 
+群锁（group_lock）经本包转出：道具子指令需要在同一段互斥区内完成
+多步写操作时使用（如「二阶堂希罗」回溯时的整群库存替换与分数恢复）。
+
 本包不做跨插件交互：签到发放道具与诅咒自动处理经 _shared/services/ 的
 ItemService（实现见 item/services.py）。
 """
@@ -50,6 +53,8 @@ from src.plugins.item.core.inventory import (
     list_user_items,
     remove_item,
     remove_items,
+    restore_group_inventory,
+    snapshot_group_inventory,
     transferable_count,
 )
 from src.plugins.item.core.registry import (
@@ -90,6 +95,7 @@ from src.plugins.item.core.use import (
     detail_text,
     run_item_use,
 )
+from src.plugins.item.storage import group_lock
 from src.plugins.item.storage.states import ItemState
 
 __all__ = [
@@ -127,6 +133,7 @@ __all__ = [
     "get_rank_entries",
     "get_state",
     "get_user_score",
+    "group_lock",
     "has_tag",
     "is_item_id",
     "items_with_tag",
@@ -143,6 +150,7 @@ __all__ = [
     "remove_items",
     "remove_state",
     "remove_states",
+    "restore_group_inventory",
     "run_item_use",
     "set_craft_odds",
     "set_draw_weights",
@@ -150,6 +158,7 @@ __all__ = [
     "set_state_data",
     "shift_quality",
     "sign_bonus",
+    "snapshot_group_inventory",
     "state_label",
     "state_version",
     "transferable_count",

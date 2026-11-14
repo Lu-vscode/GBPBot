@@ -10,7 +10,9 @@
 
 from src.plugins.item.storage.inventory import (
     add_to_inventory,
+    load_group_inventory,
     load_item_counts,
+    replace_group_inventory,
     set_item_count,
     swap_items,
     take_from_inventory,
@@ -36,8 +38,10 @@ __all__ = [
     "delete_states",
     "fetch_state",
     "group_lock",
+    "load_group_inventory",
     "load_item_counts",
     "load_states",
+    "replace_group_inventory",
     "select_state_holders",
     "set_item_count",
     "swap_items",

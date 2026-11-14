@@ -1,23 +1,24 @@
 """道具「复得之轮」（编号 325）：金色传说、复合型。
 
 使用 /item.use 325 <n> 获得持续 n 天的「复得」状态：状态有效期间，
-每天 8:00~23:00 每次使用非黑色诅咒的非复制道具（带 ItemTag.COPY
-标签的道具）时，有 1/2-arctan(7ln((n-1)/14))/π 的概率获得一件随机道具
+每天前 7 次使用非黑色诅咒的非复制道具（带 ItemTag.COPY 标签的道具）
+时，每次都有 1/2-arctan(7ln((n-1)/14))/π 的概率获得一件随机道具
 （抽取概率与签到相同，抽到黑色诅咒时按诅咒获得流程播报并自动使用），
-否则获得一件随机黑色诅咒道具；每次触发后冷却 1 小时，冷却期间使用
-道具既不触发效果也不发送提示。
+否则获得一件随机黑色诅咒道具；当天第 8 次起的使用不再触发效果，
+也不发送提示。
 
 触发经框架的道具使用后钩子（add_item_use_hook）实现：道具效果成功
-执行后由本模块判断使用者是否持有状态、是否处于生效时段与冷却中，因此
+执行后由本模块判断使用者是否持有状态、当天触发次数是否用尽，因此
 道具模块之间无需互相引用；“复制道具”经框架的标签查询（has_tag）
 识别，不从具体道具模块导入编号集合。状态附加数据保存天数（days）与
-冷却截止时刻（ready_at），冷却记录经 set_state_data 刷新，不改变状态的
-过期时刻；状态到期由定时清理静默删除，不发送提示。
+当天的触发记录（day 为本地日期、uses 为当天已触发次数），记录经
+set_state_data 刷新，不改变状态的过期时刻；跨天时按当天尚未触发处理，
+状态到期由定时清理静默删除，不发送提示。旧格式记录只带冷却截止时刻，
+按当天尚未触发处理，并在下次触发时覆盖为新格式。
 """
 
 import math
 import random
-import time
 from datetime import UTC, datetime
 
 from nonebot import logger
@@ -47,16 +48,13 @@ from src.plugins.item.core import (
 _ITEM_ID = "325"
 _STATE_KEY = f"{_ITEM_ID}.regain"
 
-# 状态附加数据中的键：持续天数与冷却截止时刻（Unix 时间戳）
+# 状态附加数据中的键：持续天数、当天日期（本地时区）与当天已触发次数
 _DAYS_KEY = "days"
-_READY_AT_KEY = "ready_at"
+_DAY_KEY = "day"
+_USES_KEY = "uses"
 
-# 每次触发后的冷却时长（秒）
-_COOLDOWN_SECONDS = 3600.0
-
-# 每日生效窗口（本地时区的小时，含起始小时、不含结束小时）
-_ACTIVE_START_HOUR = 8
-_ACTIVE_END_HOUR = 23
+# 每天可触发的次数
+_DAILY_LIMIT = 7
 
 # 一天的秒数与天数上限（与 C 的 signed int 上限相同）
 _SECONDS_PER_DAY = 86400.0
@@ -86,9 +84,9 @@ def _chance_text(chance: float) -> str:
     return f"{chance * 100:.1f}".removesuffix(".0")
 
 
-def _active_now() -> bool:
-    """判断当前时刻是否处于每日生效窗口（本地时区 8:00~23:00）。"""
-    return _ACTIVE_START_HOUR <= datetime.now(UTC).astimezone().hour < _ACTIVE_END_HOUR
+def _today() -> str:
+    """返回当前本地时区的日期文本（用作当天触发记录的日期）。"""
+    return datetime.now(UTC).astimezone().date().isoformat()
 
 
 def _parse_days(text: str) -> int | None:
@@ -116,12 +114,18 @@ def _state_days(state: ItemState) -> int | None:
     return days if 1 <= days <= _MAX_DAYS else None
 
 
-def _in_cooldown(state: ItemState, now: float) -> bool:
-    """判断状态是否处于触发后的冷却中。"""
-    ready_at = state.data.get(_READY_AT_KEY)
-    if isinstance(ready_at, bool) or not isinstance(ready_at, (int, float)):
-        return False
-    return float(ready_at) > now
+def _used_today(state: ItemState) -> int:
+    """返回状态记录中当天的触发次数。
+
+    记录日期不是今天（含旧格式只带冷却截止时刻、缺少日期与次数）时
+    按当天尚未触发处理；新记录会在下次触发时写入。
+    """
+    if state.data.get(_DAY_KEY) != _today():
+        return 0
+    uses = state.data.get(_USES_KEY)
+    if isinstance(uses, bool) or not isinstance(uses, int):
+        return 0
+    return min(max(uses, 0), _DAILY_LIMIT)
 
 
 async def _can_use(context: ItemUseContext) -> str | None:
@@ -151,16 +155,21 @@ async def _handle_use(context: ItemUseContext) -> None:
     )
     await context.send(
         f"{context.user_name} 转动了 {context.item.label}。\n"
-        f"“复得”将持续 {days} 天：每天 8:00~23:00 使用非黑色诅咒的非复制道具时，"
-        f"有 {_chance_text(_success_chance(days))}% 的概率获得一件随机道具，"
-        "否则获得一件随机黑色诅咒道具；每次触发后冷却 1 小时。"
+        f"“复得”将持续 {days} 天：每天前 {_DAILY_LIMIT} 次使用"
+        "非黑色诅咒的非复制道具时，"
+        f"每次都有 {_chance_text(_success_chance(days))}% 的概率获得一件随机道具，"
+        "否则获得一件随机黑色诅咒道具。"
     )
 
 
-async def _trigger(
-    context: ItemUseContext, state: ItemState, days: int, now: float
-) -> None:
-    """触发一次「复得」效果：按概率发放道具并记录冷却截止时刻。"""
+async def _trigger(context: ItemUseContext, days: int, used_today: int) -> None:
+    """触发一次「复得」效果：记下当天这次使用，再按概率发放道具。"""
+    await set_state_data(
+        context.group_id,
+        context.user_id,
+        _STATE_KEY,
+        {_DAYS_KEY: days, _DAY_KEY: _today(), _USES_KEY: used_today + 1},
+    )
     if random.random() < _success_chance(days):
         item = draw_random_item()
     else:
@@ -168,15 +177,9 @@ async def _trigger(
     if item is None:
         logger.warning(
             f"复得效果抽取失败（群 {context.group_id}，成员 {context.user_id}），"
-            "本次不发放道具也不进入冷却"
+            "本次不发放道具，当天次数已记入"
         )
         return
-    await set_state_data(
-        context.group_id,
-        context.user_id,
-        _STATE_KEY,
-        {**state.data, _READY_AT_KEY: now + _COOLDOWN_SECONDS},
-    )
     logger.info(
         f"群 {context.group_id} 成员 {context.user_id}（{context.user_name}）"
         f"的“复得”生效：发放道具 {item.label}（{quality_label(item.quality)}）"
@@ -211,7 +214,7 @@ async def _on_item_used(context: ItemUseContext) -> None:
     if has_tag(context.item.item_id, ItemTag.COPY):
         return
     state = await get_state(context.group_id, context.user_id, _STATE_KEY)
-    if state is None or not _active_now():
+    if state is None:
         return
     days = _state_days(state)
     if days is None:
@@ -220,10 +223,10 @@ async def _on_item_used(context: ItemUseContext) -> None:
             f"成员 {context.user_id}），本次不触发效果"
         )
         return
-    now = time.time()
-    if _in_cooldown(state, now):
+    used_today = _used_today(state)
+    if used_today >= _DAILY_LIMIT:
         return
-    await _trigger(context, state, days, now)
+    await _trigger(context, days, used_today)
 
 
 register_item(
@@ -235,9 +238,9 @@ register_item(
         description="绝对的倒转，由此而生的数值，教会你爱的是……",
         effect=(
             f'使用指令"/item.use {_ITEM_ID} <n>"获得持续n天的“复得”状态：'
-            "每天8:00到23:00每次使用非黑色诅咒的非复制道具有"
+            "每天前7次使用非黑色诅咒的非复制道具时，每次都有"
             "(1/2-arctan(7ln((n-1)/14))/π)的概率获得一个随机道具"
-            "（概率与签到相同），否则获得一个随机黑色诅咒道具，冷却时间1小时。"
+            "（概率与签到相同），否则获得一个随机黑色诅咒道具。"
         ),
         condition="没有“复得”状态",
         note="每一份命运的馈赠，早已暗中标好了价格。",

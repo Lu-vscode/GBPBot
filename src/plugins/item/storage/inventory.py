@@ -6,7 +6,7 @@
 库存。
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from nonebot_plugin_orm import get_session
 from sqlalchemy import delete, select, update
@@ -50,6 +50,49 @@ async def add_to_inventory(
                     set_={"count": ItemInventory.count + count},
                 )
             )
+
+
+async def load_group_inventory(group_id: int) -> dict[int, dict[str, int]]:
+    """读取指定群全部成员的库存（成员 QQ 号 -> {道具编号: 数量}）。
+
+    没有库存记录的成员不出现在结果中；供需要按群整体处理库存的道具
+    使用（如「二阶堂希罗」记录并回溯本群道具）。
+    """
+    statement = select(
+        ItemInventory.user_id, ItemInventory.item_id, ItemInventory.count
+    ).where(ItemInventory.group_id == group_id)
+    async with get_session() as session:
+        rows = (await session.execute(statement)).all()
+    inventory: dict[int, dict[str, int]] = {}
+    for user_id, item_id, count in rows:
+        inventory.setdefault(int(user_id), {})[str(item_id)] = int(count)
+    return inventory
+
+
+async def replace_group_inventory(
+    group_id: int, inventory: Mapping[int, Mapping[str, int]]
+) -> None:
+    """用给定库存整体替换指定群的全部库存（单个事务）。
+
+    先删除该群的库存行，再写入 inventory 中的条目（数量不大于 0 的
+    条目跳过）；替换期间出错时事务整体回滚，不会留下"删了一半"的库存。
+    """
+    async with get_session() as session, session.begin():
+        await session.execute(
+            delete(ItemInventory).where(ItemInventory.group_id == group_id)
+        )
+        for user_id, items in inventory.items():
+            for item_id, count in items.items():
+                if count <= 0:
+                    continue
+                await session.execute(
+                    sqlite_insert(ItemInventory).values(
+                        group_id=group_id,
+                        user_id=user_id,
+                        item_id=item_id,
+                        count=count,
+                    )
+                )
 
 
 async def set_item_count(group_id: int, user_id: int, item_id: str, count: int) -> None:
