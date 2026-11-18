@@ -1,7 +1,7 @@
 """道具「Not Found」（编号 404）：黑色诅咒、诅咒型。
 
 获得后不进入库存，由主模块先发送完整信息、随后自动使用：获得持续
-1 小时的「404」状态。状态有效期间该成员无法发起决斗，也不会被他人
+12 小时的「404」状态。状态有效期间该成员无法发起决斗，也不会被他人
 发起决斗——发起流程在 challenge 事件中被本模块阻断（设置 block_reason
 为"404 Not Found"，由决斗插件发送提示并取消决斗创建，见
 _shared/services/ 的决斗事件服务）。
@@ -31,8 +31,8 @@ from src.plugins.item.core import (
 _ITEM_ID = "404"
 _STATE_KEY = f"{_ITEM_ID}.not_found"
 
-# 「404」状态的持续时长（秒）：1 小时
-_DURATION_SECONDS = 3600.0
+# 「404」状态的持续时长（秒）：12 小时
+_DURATION_SECONDS = 43200.0
 
 # 阻断决斗发起时发送的提示文案（自身发起与被发起时相同）
 _BLOCK_REASON = "404 Not Found"
@@ -62,7 +62,7 @@ _event_service.subscribe(_on_duel_event)
 
 
 async def _handle_use(context: ItemUseContext) -> None:
-    """使用效果：先登记持续 1 小时的「404」状态，再发送生效提示。
+    """使用效果：先登记持续 12 小时的「404」状态，再发送生效提示。
 
     先登记状态再发送提示：提示经发送排队期间状态已生效，期间发起的
     决斗也能被正常阻断。
@@ -76,7 +76,7 @@ async def _handle_use(context: ItemUseContext) -> None:
     await context.send(
         f"@{context.user_name}\n"
         f"{_BLOCK_REASON}\n"
-        "你请求的页面似乎不存在，1 小时内无法发起决斗，"
+        "你请求的页面似乎不存在，12 小时内无法发起决斗，"
         "也没有人能向你发起决斗。"
     )
 
@@ -87,7 +87,7 @@ register_item(
         name="Not Found",
         quality=Quality.BLACK_CURSE,
         description="404 Not Found",
-        effect="使用后获得持续1小时的“404”状态，无法发起/被发起决斗。",
+        effect="使用后获得持续12小时的“404”状态，无法发起/被发起决斗。",
         timing="自动使用",
         note="404 Not Found",
         labels=((_STATE_KEY, "404"),),
