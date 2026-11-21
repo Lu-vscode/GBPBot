@@ -9,8 +9,13 @@
 与决斗、道具插件的交互通过跨插件服务实现（见 _shared/services/）：
 加载时用 require("duel")、require("item") 声明依赖，确保分数与道具
 服务提供方已加载并完成注册；签到时经服务注册中心取用分数服务增加
-决斗分数（基础分数与道具加成之和）、取用道具服务发放随机道具（黑色
+决斗分数（基础分数与道具加成之和），取用道具服务发放随机道具（黑色
 诅咒由道具服务在签到文案之后完成信息播报与自动使用）。
+
+本插件同时对外提供补签服务（SignMakeUpService）：供「补签卡」等道具
+为成员补上指定日期的签到。补签写入与签到相同的记录，奖励复用签到
+本身的流程（基础分数与道具加成、随机道具抽取），不复制判定逻辑，
+因此补签获得的奖励始终以签到当刻的判定为准。
 """
 
 from datetime import UTC, datetime
@@ -39,7 +44,10 @@ from src.plugins._shared.services import (
     DuelScoreService,
     GrantedItem,
     ItemService,
+    MakeUpResult,
+    SignMakeUpService,
     SignScoreBonusService,
+    register_service,
     require_service,
 )
 
@@ -195,6 +203,31 @@ _item_service = require_service(ItemService)
 _score_bonus_service = require_service(SignScoreBonusService)
 
 
+class _SignMakeUpService(SignMakeUpService):
+    """补签服务的实现：其他插件（如「补签卡」）经服务注册中心调用。
+
+    记录写入与奖励发放复用签到本身的流程（见 _try_sign），不复制
+    分数判定与道具抽取，因此补签获得的奖励总是以签到当刻的判定为准。
+    """
+
+    async def has_record(self, group_id: int, user_id: int, date: str) -> bool:
+        """返回成员是否已有指定日期的签到记录。"""
+        return await _has_record(group_id, user_id, date)
+
+    async def make_up(
+        self, group_id: int, user_id: int, name: str, date: str
+    ) -> MakeUpResult:
+        """为成员补上指定日期的签到并发放签到奖励（已签到时不算补签）。"""
+        signed, granted, gain = await _try_sign(
+            group_id, user_id, name, date, makeup=True
+        )
+        return MakeUpResult(signed=signed, score_gain=gain, granted=granted)
+
+
+# 将补签能力注册为跨插件服务，供「补签卡」等道具为成员补上历史签到
+register_service(SignMakeUpService, _SignMakeUpService())
+
+
 def _current_date() -> str:
     """返回当前日期（本地时区，YYYY-MM-DD），用于判断当天是否已签到。
 
@@ -215,7 +248,7 @@ _REWARD_ERRORS = (Exception,)
 
 
 async def _insert_record(group_id: int, user_id: int, date: str) -> bool:
-    """写入当天签到记录，返回是否写入成功（当天已签到时返回 False）。
+    """写入 date 对应的签到记录，返回是否写入成功（已签到时返回 False）。
 
     唯一约束（群号、成员 QQ 号、日期）保证同日只有一条记录，并发签到
     时只有一个事件能插入成功，其余按"今天已签到"处理，不依赖进程内
@@ -236,7 +269,7 @@ async def _insert_record(group_id: int, user_id: int, date: str) -> bool:
 async def _set_record_item(
     group_id: int, user_id: int, date: str, item_id: str
 ) -> None:
-    """把当天签到记录的道具编号回填为实际获得的道具编号。"""
+    """把 date 对应签到记录的道具编号回填为实际获得的道具编号。"""
     async with get_session() as session, session.begin():
         await session.execute(
             update(SignRecord)
@@ -247,6 +280,21 @@ async def _set_record_item(
             )
             .values(item_id=item_id)
         )
+
+
+async def _has_record(group_id: int, user_id: int, date: str) -> bool:
+    """判断成员是否已有指定日期的签到记录（供补签等场景查询）。"""
+    statement = (
+        select(SignRecord.id)
+        .where(
+            SignRecord.group_id == group_id,
+            SignRecord.user_id == user_id,
+            SignRecord.date == date,
+        )
+        .limit(1)
+    )
+    async with get_session() as session:
+        return await session.scalar(statement) is not None
 
 
 async def _count_records(group_id: int, user_id: int) -> int:
@@ -264,19 +312,29 @@ async def _count_records(group_id: int, user_id: int) -> int:
 
 
 async def _try_sign(
-    group_id: int, user_id: int, name: str, date: str
+    group_id: int,
+    user_id: int,
+    name: str,
+    date: str,
+    *,
+    makeup: bool = False,
 ) -> tuple[bool, GrantedItem | None, int]:
     """尝试为成员签到，返回 (是否签到成功, 道具发放结果, 获得的决斗分数)。
 
-    先写入当天签到记录（唯一约束判定是否重复签到）；写入成功后向分数
-    服务发放决斗分数（基础分数与道具加成之和，加成见
+    先写入 date 对应的签到记录（唯一约束判定是否重复签到）；写入成功
+    后向分数服务发放决斗分数（基础分数与道具加成之和，加成见
     SignScoreBonusService）、经道具服务发放随机道具并回填本次记录的
-    道具编号。奖励发放中途出错时保留"当天已签到但未发奖"的状态（比
-    重复领奖安全）并只记录错误日志；当天已签到时不做任何修改，返回
-    (False, None, 0)。
+    道具编号。奖励发放中途出错时保留"已签到但未发奖"的状态（比
+    重复领奖安全）并只记录错误日志；该日期已签到时不做任何修改，
+    返回 (False, None, 0)。
+
+    makeup 为 True 表示本次是补签（写入的是 date 指定的历史日期）：
+    流程与签到完全一致，只影响日志文案——补签的奖励因此总以签到当刻
+    的判定为准（见 SignMakeUpService）。
     """
     if not await _insert_record(group_id, user_id, date):
         return False, None, 0
+    action = "补签" if makeup else "签到"
     gain = _score_gain
     try:
         gain += await _score_bonus_service.extra_score(group_id, user_id)
@@ -292,8 +350,8 @@ async def _try_sign(
             await _set_record_item(group_id, user_id, date, granted.item_id)
     except _REWARD_ERRORS as exc:
         logger.error(
-            f"群 {group_id} 成员 {user_id}（{name}）的签到奖励发放失败，"
-            f"当天记录已写入且不补发：{exc!r}"
+            f"群 {group_id} 成员 {user_id}（{name}）的{action}奖励发放失败，"
+            f"记录已写入且不补发：{exc!r}"
         )
     try:
         total = await _count_records(group_id, user_id)
@@ -305,7 +363,7 @@ async def _try_sign(
     else:
         item_text = f"，获得道具 {granted.item_id} {granted.item_name}"
     logger.info(
-        f"群 {group_id} 成员 {user_id}（{name}）签到成功"
+        f"群 {group_id} 成员 {user_id}（{name}）{action}成功"
         f"（累计 {total} 次），决斗分数+{awarded}{item_text}"
     )
     return True, granted, awarded

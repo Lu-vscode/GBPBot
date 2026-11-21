@@ -4,6 +4,10 @@
 主键为 (群号, 成员 QQ 号, 道具编号)，数量约束 `count > 0` 由数据库强制，
 数量归零即删除条目。本模块直接读写数据库，不导入插件代码；插件侧表
 结构变更时必须同步维护本模块的表名与列名。
+
+`give` 按成员逐个发放；`give-batch` 以群内有签到记录的成员为发放范围
+（成员由 _signs 的签到表筛出），支持签到天数、签到日期区间、已持有
+上限与排除名单等额外筛选条件。
 """
 
 import argparse
@@ -11,13 +15,16 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from . import _pipeline
+from . import _pipeline, _signs
 
 TABLE = "gbp_item_inventory"
 LABEL = "道具库存数据"
 
 # 道具编号长度（三位数字字符串，如 "044"）
 _ITEM_ID_LENGTH = 3
+
+# 批量发放预览时最多逐行展示的成员数（其余用汇总行收尾）
+_BATCH_PREVIEW_LIMIT = 50
 
 
 def validate(conn: sqlite3.Connection) -> list[str]:
@@ -81,6 +88,13 @@ def _check_count(count: int) -> None:
     """校验数量参数为正整数。"""
     if count < 1:
         message = f"数量必须为正整数：{count}"
+        raise _pipeline.SafetyError(message)
+
+
+def _check_optional_int(value: int | None, label: str, minimum: int) -> None:
+    """校验可选的整数筛选参数不低于下限（None 表示未指定）。"""
+    if value is not None and value < minimum:
+        message = f"{label}不能小于 {minimum}：{value}"
         raise _pipeline.SafetyError(message)
 
 
@@ -188,6 +202,102 @@ def run_give(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
             " ON CONFLICT (group_id, user_id, item_id) DO UPDATE SET"
             " count = count + excluded.count",
             (group_id, user_id, item_id, args.count),
+        )
+
+    _execute(ctx, changes, apply)
+    return 0
+
+
+def _owned_counts(
+    conn: sqlite3.Connection, group_id: int, item_id: str
+) -> dict[int, int]:
+    """读取群内成员持有某道具的数量（未持有视为 0）。"""
+    rows = conn.execute(
+        f"SELECT user_id, count FROM {TABLE} WHERE group_id = ? AND item_id = ?",
+        (group_id, item_id),
+    ).fetchall()
+    return {int(row["user_id"]): int(row["count"]) for row in rows}
+
+
+def _batch_filters(args: argparse.Namespace) -> _signs.MemberFilter:
+    """校验并整理批量发放的签到筛选参数。"""
+    _check_optional_int(args.min_days, "签到天数下限", 0)
+    _check_optional_int(args.max_days, "签到天数上限", 0)
+    if (
+        args.min_days is not None
+        and args.max_days is not None
+        and args.min_days > args.max_days
+    ):
+        message = f"签到天数下限（{args.min_days}）不能大于上限（{args.max_days}）。"
+        raise _pipeline.SafetyError(message)
+    since = (
+        None if args.since is None else _signs.normalize_date(args.since, "起始日期")
+    )
+    until = (
+        None if args.until is None else _signs.normalize_date(args.until, "截止日期")
+    )
+    if since is not None and until is not None and since > until:
+        message = f"起始日期（{since}）不能晚于截止日期（{until}）。"
+        raise _pipeline.SafetyError(message)
+    return _signs.MemberFilter(
+        min_days=args.min_days, max_days=args.max_days, since=since, until=until
+    )
+
+
+def run_give_batch(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
+    """给群内有签到记录的成员批量发放道具（可额外筛选成员）。"""
+    group_id = _as_int(args.group, "群号")
+    item_id = normalize_item_id(args.item)
+    _check_count(args.count)
+    _check_optional_int(args.max_owned, "已持有上限", 0)
+    filters = _batch_filters(args)
+    excluded = {_as_int(text, "排除的 QQ 号") for text in args.exclude}
+
+    conn = _pipeline.connect_db(ctx, [TABLE, _signs.TABLE])
+    try:
+        rows = _signs.select_members(conn, group_id, filters)
+        if excluded:
+            rows = [row for row in rows if int(row["user_id"]) not in excluded]
+        owned = _owned_counts(conn, group_id, item_id)
+        if args.max_owned is not None:
+            rows = [
+                row
+                for row in rows
+                if owned.get(int(row["user_id"]), 0) < args.max_owned
+            ]
+        signed_total = 0 if rows else len(_signs.select_members(conn, group_id))
+    finally:
+        conn.close()
+
+    if not rows:
+        if not signed_total:
+            print(f"群 {args.group} 没有签到记录，没有成员可发放。")
+        else:
+            print(
+                f"群 {args.group} 有 {signed_total} 名成员有签到记录，"
+                "但没有成员符合当前筛选条件。"
+            )
+        return 0
+
+    changes = [
+        f"群 {args.group} 中符合筛选的 {len(rows)} 名成员各发放道具"
+        f" {item_id}x{args.count}"
+    ]
+    for row in rows[:_BATCH_PREVIEW_LIMIT]:
+        user_id = int(row["user_id"])
+        old = owned.get(user_id, 0)
+        changes.append(f"成员 {user_id} 道具 {item_id}：{old} -> {old + args.count}")
+    if len(rows) > _BATCH_PREVIEW_LIMIT:
+        rest = len(rows) - _BATCH_PREVIEW_LIMIT
+        changes.append(f"……其余 {rest} 名成员同样各 +{args.count}（略）")
+
+    def apply(conn: sqlite3.Connection) -> None:
+        conn.executemany(
+            f"INSERT INTO {TABLE} (group_id, user_id, item_id, count)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (group_id, user_id, item_id) DO UPDATE SET"
+            " count = count + excluded.count",
+            [(group_id, int(row["user_id"]), item_id, args.count) for row in rows],
         )
 
     _execute(ctx, changes, apply)
@@ -319,6 +429,55 @@ def register(subparsers: Any) -> None:
     _pipeline.add_global_options(give_parser, suppressed=True)
     _add_item_args(give_parser, with_count=True)
     give_parser.set_defaults(handler=run_give)
+
+    batch_parser = verbs.add_parser(
+        "give-batch", help="给群内有签到记录的成员批量发放道具（可额外筛选）"
+    )
+    _pipeline.add_global_options(batch_parser, suppressed=True)
+    batch_parser.add_argument(
+        "-g", "--group", required=True, metavar="群号", help="群号"
+    )
+    batch_parser.add_argument(
+        "-i", "--item", required=True, metavar="编号", help='道具编号（如 44 或 "044"）'
+    )
+    batch_parser.add_argument(
+        "-n",
+        "--count",
+        type=int,
+        default=1,
+        metavar="数量",
+        help="每人发放数量（默认 1）",
+    )
+    batch_parser.add_argument(
+        "--min-days", type=int, metavar="天数", help="只发给签到天数不少于该值的成员"
+    )
+    batch_parser.add_argument(
+        "--max-days", type=int, metavar="天数", help="只发给签到天数不多于该值的成员"
+    )
+    batch_parser.add_argument(
+        "--since",
+        metavar="日期",
+        help="只统计该日期（YYYY-MM-DD）起的签到（含当天）",
+    )
+    batch_parser.add_argument(
+        "--until",
+        metavar="日期",
+        help="只统计截至该日期（YYYY-MM-DD）的签到（含当天）",
+    )
+    batch_parser.add_argument(
+        "--max-owned",
+        type=int,
+        metavar="数量",
+        help="跳过已持有该道具不少于该数量的成员",
+    )
+    batch_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="QQ号",
+        help="排除该成员（可重复使用）",
+    )
+    batch_parser.set_defaults(handler=run_give_batch)
 
     take_parser = verbs.add_parser("take", help="从成员处扣除道具（扣到 0 移除条目）")
     _pipeline.add_global_options(take_parser, suppressed=True)

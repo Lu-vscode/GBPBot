@@ -28,7 +28,8 @@ NoneBot 的插件之间不应互相导入模块（提前导入会导致插件无
   决斗状态快照、event.py 生命周期事件与结算接管、gesture.py 手势判定与
   所需手势数量、action.py 接受概率/挑衅/点数缩放/取消/认输）；
 - item.py：道具插件对外提供的道具发放服务；
-- sign.py：签到分数加成服务（由道具插件提供、签到插件调用）；
+- sign.py：签到分数加成服务（由道具插件提供、签到插件调用）与补签服务
+  （由签到插件提供、道具插件调用，如「补签卡」）；
 - moderation.py：纯文本内容审核服务、审核结果与不可用异常（由内容审核
   插件提供）。
 """
@@ -73,7 +74,11 @@ from src.plugins._shared.services.registry import (
     register_service,
     require_service,
 )
-from src.plugins._shared.services.sign import SignScoreBonusService
+from src.plugins._shared.services.sign import (
+    MakeUpResult,
+    SignMakeUpService,
+    SignScoreBonusService,
+)
 
 __all__ = [
     "DuelBotAcceptService",
@@ -103,10 +108,12 @@ __all__ = [
     "DuelStateService",
     "GrantedItem",
     "ItemService",
+    "MakeUpResult",
     "ModerationResult",
     "ModerationUnavailableError",
     "ScoreInterceptor",
     "SettleHandler",
+    "SignMakeUpService",
     "SignScoreBonusService",
     "TextModerationService",
     "get_service",

@@ -4,11 +4,16 @@
 自增 id，(群号, 成员 QQ 号, 签到日期) 唯一。本模块不提供改写命令：签到
 记录只由插件的签到流程追加（同日重复签到由唯一约束拒绝），补录或删除
 应通过插件流程或直接连库完成，避免破坏"当天唯一"的约束语义。
+
+除只读命令外，本模块还导出 select_members（按签到记录筛选成员），供
+inventory 的批量发放（give-batch）确定发放范围——成员来源只有签到表。
 """
 
 import argparse
 import re
 import sqlite3
+from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from . import _pipeline
@@ -18,6 +23,23 @@ LABEL = "签到记录数据"
 
 # 签到日期格式（本地时区 YYYY-MM-DD）
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True)
+class MemberFilter:
+    """按签到记录筛选成员的条件（各项为 None 表示不限制）。"""
+
+    min_days: int | None = None
+    """签到天数下限。"""
+
+    max_days: int | None = None
+    """签到天数上限。"""
+
+    since: str | None = None
+    """只看该日期（YYYY-MM-DD）起的签到。"""
+
+    until: str | None = None
+    """只看截至该日期（YYYY-MM-DD）的签到。"""
 
 
 def validate(conn: sqlite3.Connection) -> list[str]:
@@ -61,6 +83,56 @@ def _as_int(text: str, label: str) -> int:
         message = f"{label}必须为正整数：{text!r}"
         raise _pipeline.SafetyError(message)
     return int(value)
+
+
+def normalize_date(text: str, label: str) -> str:
+    """校验命令行给出的签到日期（YYYY-MM-DD，无效时报错拒绝）。"""
+    value = text.strip()
+    if not _DATE_PATTERN.fullmatch(value):
+        message = f"{label}必须是 YYYY-MM-DD 格式：{text!r}"
+        raise _pipeline.SafetyError(message)
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        message = f"{label}不是有效日期：{text!r}（{exc}）"
+        raise _pipeline.SafetyError(message) from exc
+    return value
+
+
+def select_members(
+    conn: sqlite3.Connection,
+    group_id: int,
+    filters: MemberFilter | None = None,
+) -> list[sqlite3.Row]:
+    """按签到记录筛选群内的成员，返回 (user_id, days, last) 列表。
+
+    since/until 为本地日期 YYYY-MM-DD（含端点），只统计该区间内的签到；
+    min_days/max_days 作用于区间内的签到天数。结果按 QQ 号升序。
+    """
+    criteria = filters or MemberFilter()
+    where = ["group_id = ?"]
+    params: list[Any] = [group_id]
+    if criteria.since is not None:
+        where.append("date >= ?")
+        params.append(criteria.since)
+    if criteria.until is not None:
+        where.append("date <= ?")
+        params.append(criteria.until)
+    having: list[str] = []
+    if criteria.min_days is not None:
+        having.append("COUNT(*) >= ?")
+        params.append(criteria.min_days)
+    if criteria.max_days is not None:
+        having.append("COUNT(*) <= ?")
+        params.append(criteria.max_days)
+    statement = (
+        f"SELECT user_id, COUNT(*) AS days, MAX(date) AS last FROM {TABLE}"
+        " WHERE " + " AND ".join(where) + " GROUP BY user_id"
+    )
+    if having:
+        statement += " HAVING " + " AND ".join(having)
+    statement += " ORDER BY user_id"
+    return conn.execute(statement, params).fetchall()
 
 
 def run_list(ctx: _pipeline.Context, args: argparse.Namespace) -> int:
